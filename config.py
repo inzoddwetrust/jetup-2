@@ -192,11 +192,6 @@ class Config:
 
         Returns:
             List of channel dicts for specified language
-
-        Example:
-            >>> channels = Config.get_channels_by_lang('ru')
-            >>> for ch in channels:
-            ...     print(ch['title'], ch['url'])
         """
         all_channels = cls.get(cls.REQUIRED_CHANNELS, [])
         return [ch for ch in all_channels if ch.get('lang') == lang]
@@ -220,6 +215,61 @@ class Config:
             raise ConfigurationError(error_msg)
 
         logger.info("All critical configuration keys validated ✓")
+
+    @classmethod
+    async def initialize_dynamic_from_sheets(cls) -> None:
+        """
+        Load dynamic configuration from Google Sheets.
+        Merges with .env configuration, Google Sheets values take precedence.
+
+        Expected Config sheet format:
+        | key | value | description |
+
+        Raises:
+            ConfigurationError: If critical error occurs during loading
+        """
+        try:
+            from services.data_importer import ConfigImporter
+
+            logger.info("Loading dynamic configuration from Google Sheets...")
+            config_dict = await ConfigImporter.import_config()
+
+            if not config_dict:
+                logger.warning("No configuration loaded from Google Sheets")
+                return
+
+            logger.info(f"Loaded {len(config_dict)} configuration variables from Google Sheets")
+
+            # Update known configuration keys
+            updates = []
+
+            if 'REQUIRED_CHANNELS' in config_dict:
+                cls.set(cls.REQUIRED_CHANNELS, config_dict['REQUIRED_CHANNELS'], source="sheets")
+                updates.append(f"REQUIRED_CHANNELS: {len(config_dict['REQUIRED_CHANNELS'])} channels")
+
+            if 'DEFAULT_REFERRER_ID' in config_dict:
+                cls.set(cls.DEFAULT_REFERRER_ID, config_dict['DEFAULT_REFERRER_ID'], source="sheets")
+                updates.append(f"DEFAULT_REFERRER_ID: {config_dict['DEFAULT_REFERRER_ID']}")
+
+            if 'WALLETS' in config_dict:
+                cls.set('WALLETS', config_dict['WALLETS'], source="sheets")
+                updates.append(f"WALLETS: {len(config_dict['WALLETS'])} configured")
+
+            # Store all other keys for potential use
+            for key, value in config_dict.items():
+                if key not in ['REQUIRED_CHANNELS', 'DEFAULT_REFERRER_ID', 'WALLETS']:
+                    cls.set(key, value, source="sheets")
+
+            if updates:
+                logger.info("Updated configuration from Google Sheets:")
+                for update in updates:
+                    logger.info(f"  - {update}")
+
+            logger.info("✓ Dynamic configuration loaded successfully")
+
+        except Exception as e:
+            logger.error(f"Failed to load dynamic configuration: {e}", exc_info=True)
+            logger.warning("⚠️ Continuing with .env configuration only")
 
     @classmethod
     def get(cls, key: str, default: Any = None) -> Any:

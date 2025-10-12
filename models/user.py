@@ -96,33 +96,69 @@ class User(Base):
 
     # Class methods
     @classmethod
-    def create_from_telegram_data(cls, session, telegram_user):
+    def create_from_telegram_data(cls, session, telegram_user, referrer_id=None):
         """
-        Создаёт нового пользователя или возвращает существующего из базы данных на основе данных Telegram.
-        Если таблица пользователей пуста, создает первого пользователя с ID=1
+        Create new user or return existing one from Telegram data.
+        If table is empty, creates first user with ID=1.
+        Upline is MANDATORY - uses referrer_id or DEFAULT_REFERRER_ID from config.
+
+        Args:
+            session: SQLAlchemy session
+            telegram_user: Telegram user object
+            referrer_id: Telegram ID of referrer (optional)
+
+        Returns:
+            User: Created or existing user object
+
+        Raises:
+            ValueError: If DEFAULT_REFERRER_ID not configured and no referrer provided
         """
+        from config import Config
+
+        # Check if user exists
         user = session.query(cls).filter_by(telegramID=telegram_user.id).first()
-        if not user:
-            # Проверяем, есть ли вообще записи в таблице
-            users_exist = session.query(cls).first() is not None
+        if user:
+            return user
 
-            if not users_exist:
-                # Если таблица пуста, создаем первого пользователя с ID=1
-                new_user_id = 1
+        # Determine userID
+        users_exist = session.query(cls).first() is not None
+        if not users_exist:
+            new_user_id = 1
+        else:
+            max_user_id = session.query(cls).order_by(cls.userID.desc()).first()
+            new_user_id = max_user_id.userID + 1
+
+        # Determine upline (MANDATORY)
+        upline = None
+
+        if referrer_id:
+            referrer = session.query(cls).filter_by(telegramID=referrer_id).first()
+            if referrer:
+                upline = referrer_id
             else:
-                # Назначаем следующий ID по порядку
-                max_user_id = session.query(cls).order_by(cls.userID.desc()).first()
-                new_user_id = max_user_id.userID + 1
+                # Referrer not found, use default
+                upline = Config.get(Config.DEFAULT_REFERRER_ID)
+        else:
+            # No referrer provided, use default
+            upline = Config.get(Config.DEFAULT_REFERRER_ID)
 
-            user = cls(
-                userID=new_user_id,
-                telegramID=telegram_user.id,
-                lang=telegram_user.language_code,
-                firstname=telegram_user.first_name,
-                surname=telegram_user.last_name or None
+        if not upline:
+            raise ValueError(
+                "Cannot create user: DEFAULT_REFERRER_ID not configured and no valid referrer provided"
             )
-            session.add(user)
-            session.commit()
+
+        # Create user
+        user = cls(
+            userID=new_user_id,
+            telegramID=telegram_user.id,
+            upline=upline,
+            lang=telegram_user.language_code,
+            firstname=telegram_user.first_name,
+            surname=telegram_user.last_name or None
+        )
+        session.add(user)
+        session.commit()
+
         return user
 
     # Properties для обратной совместимости
