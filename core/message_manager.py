@@ -1,27 +1,19 @@
-# jetup/core/message_manager.py
+# jetup-2/core/message_manager.py
 """
 Message manager for Jetup bot.
-Hybrid: helpbot's architecture + talentir's features (PDF, media handling).
-
-Handles:
-- Sending messages with templates
-- Media messages (photo, video, document)
-- Inline keyboards
-- Message editing
-- Callback query processing
-- PDF document generation (via BookStack)
+Clean architecture from helpbot + Talentir features.
 """
 import logging
-from typing import Optional, Dict, Any, Union, List
+from typing import Optional, Dict, Any, Union, List, Tuple
 
 from aiogram import Bot
 from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
-    InputFile,
     BufferedInputFile,
-    FSInputFile
+    InputMediaPhoto,
+    InputMediaVideo
 )
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
@@ -34,35 +26,24 @@ logger = logging.getLogger(__name__)
 
 class MessageManager:
     """
-    Manager for sending and editing messages with template support.
-
-    Features:
-    - Template-based messages from Google Sheets
-    - Media support (photo, video, document, PDF)
-    - Inline keyboards with variable substitution
-    - Message editing
-    - Callback query processing with postAction
-    - PDF generation via BookStack
+    Message manager for aiogram 3.x that handles template processing,
+    callbacks, and message delivery with media attachments.
     """
 
     def __init__(self, bot: Bot):
         """
-        Initialize message manager.
+        Initialize message manager with bot instance.
 
         Args:
-            bot: Bot instance
+            bot: Aiogram Bot instance
         """
         self.bot = bot
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # MAIN SEND METHOD
-    # ═══════════════════════════════════════════════════════════════════════
 
     async def send_template(
             self,
             user,
             template_key: Union[str, List[str]],
-            update: Optional[Union[Message, CallbackQuery]] = None,
+            update: Union[Message, CallbackQuery],
             variables: Optional[Dict[str, Any]] = None,
             edit: bool = False,
             delete_original: bool = False,
@@ -71,33 +52,31 @@ class MessageManager:
             execute_preaction: bool = True
     ) -> Optional[Message]:
         """
-        Send message using template from Google Sheets.
+        Send a message based on template.
 
         Args:
-            user: User object
-            template_key: Template state key (or list of keys for sequence)
-            update: Message or CallbackQuery to reply to
-            variables: Variables for template substitution
-            edit: Edit existing message instead of sending new
-            delete_original: Delete original message after sending
-            override_media_id: Override template's mediaID
-            media_type: Override template's mediaType
-            execute_preaction: Execute preAction (default: True)
+            user: User object for localization
+            template_key: Template key or list of keys
+            update: Message or CallbackQuery that triggered this action
+            variables: Optional variables for template formatting
+            edit: Whether to edit existing message or send new one
+            delete_original: Whether to delete the original message
+            override_media_id: Override media ID from template
+            media_type: Override media type from template
+            execute_preaction: Whether to execute preAction
 
         Returns:
-            Sent/edited Message or None if failed
-
-        Example:
-            await message_manager.send_template(
-                user=user,
-                template_key="welcome_screen",
-                update=message,
-                variables={"name": user.firstname}
-            )
+            Optional[Message]: The sent or edited message, or None on error
         """
-        variables = variables or {}
-
         try:
+            logger.debug(
+                f"send_template: key={template_key}, "
+                f"vars={list(variables.keys()) if variables else None}, "
+                f"exec_preaction={execute_preaction}"
+            )
+
+            chat_id, message_id = self._extract_message_info(update)
+
             # Prepare template data
             template_data = await self._prepare_template(
                 user=user,
@@ -109,277 +88,36 @@ class MessageManager:
             )
 
             if not template_data:
-                logger.error(f"Failed to prepare template: {template_key}")
+                logger.error(f"Failed to prepare template for {template_key}")
                 return None
 
-            text, keyboard, media_id, media_type_final, parse_mode, disable_preview, _ = template_data
-
-            # Determine chat_id
-            if isinstance(update, CallbackQuery):
-                chat_id = update.message.chat.id
-                message_id = update.message.message_id if edit else None
-            elif isinstance(update, Message):
-                chat_id = update.chat.id
-                message_id = update.message_id if edit else None
-            else:
-                chat_id = user.telegramID
-                message_id = None
-
-            # Send or edit message
-            sent_message = await self._send_message(
-                chat_id=chat_id,
-                text=text,
-                media_id=media_id,
-                media_type=media_type_final,
-                keyboard=keyboard,
-                parse_mode=parse_mode,
-                disable_preview=disable_preview,
-                edit=edit,
-                message_id=message_id
-            )
+            # CORRECT unpacking: text, media_id, keyboard, parse_mode, disable_preview, preaction, postaction
+            text, media_id, keyboard, parse_mode_str, disable_preview, preaction, postaction = template_data
+            parse_mode = self._parse_mode_to_enum(parse_mode_str)
 
             # Delete original message if requested
             if delete_original and update:
                 await safe_delete_message(update)
+                edit = False  # Force new message after deletion
 
-            return sent_message
-
-        except Exception as e:
-            logger.error(f"Error in send_template: {e}", exc_info=True)
-            return None
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # TEMPLATE PREPARATION
-    # ═══════════════════════════════════════════════════════════════════════
-
-    async def _prepare_template(
-            self,
-            user,
-            template_key: Union[str, List[str]],
-            variables: Optional[Dict[str, Any]] = None,
-            override_media_id: Optional[str] = None,
-            media_type: Optional[str] = None,
-            execute_preaction: bool = True
-    ) -> Optional[tuple]:
-        """
-        Prepare template: get from cache, execute preAction, format text.
-
-        Returns:
-            Tuple: (text, keyboard, media_id, media_type, parse_mode, disable_preview, postaction)
-            or None if failed
-        """
-        variables = variables or {}
-
-        # Handle list of templates (for sequences)
-        if isinstance(template_key, list):
-            if not template_key:
-                return None
-            template_key = template_key[0]  # Use first template
-
-        # Get template from cache
-        template = await MessageTemplates.get_template(template_key, user.lang)
-        if not template:
-            logger.error(f"Template not found: {template_key} (lang: {user.lang})")
-            return None
-
-        # Execute preAction if enabled
-        preaction = template.get('preAction', '')
-        if execute_preaction and preaction:
-            try:
-                variables = await MessageTemplates.execute_preaction(preaction, user, variables)
-            except Exception as e:
-                logger.error(f"Error executing preAction '{preaction}': {e}")
-
-        # Format text with variables
-        text = template.get('text', '')
-        try:
-            # Check for rgroup
-            if '{{rgroup}}' in text:
-                text = MessageTemplates.process_repeating_group(text, variables)
-            else:
-                text = MessageTemplates.format_text(text, variables)
-        except Exception as e:
-            logger.error(f"Error formatting text: {e}")
-
-        # Create keyboard
-        buttons_str = template.get('buttons', '')
-        keyboard = None
-        if buttons_str:
-            try:
-                keyboard = MessageTemplates.create_keyboard(buttons_str, variables)
-            except Exception as e:
-                logger.error(f"Error creating keyboard: {e}")
-
-        # Media
-        final_media_id = override_media_id or template.get('mediaID', '')
-        final_media_type = media_type or template.get('mediaType', '')
-
-        # Parse mode
-        parse_mode_str = template.get('parseMode', 'HTML')
-        parse_mode = ParseMode.HTML if parse_mode_str == 'HTML' else ParseMode.MARKDOWN
-
-        # Disable preview
-        disable_preview = template.get('disablePreview', True)
-
-        # PostAction
-        postaction = template.get('postAction', '')
-
-        return (text, keyboard, final_media_id, final_media_type, parse_mode, disable_preview, postaction)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # MESSAGE SENDING
-    # ═══════════════════════════════════════════════════════════════════════
-
-    async def _send_message(
-            self,
-            chat_id: int,
-            text: str,
-            media_id: Optional[str] = None,
-            media_type: Optional[str] = None,
-            keyboard: Optional[InlineKeyboardMarkup] = None,
-            parse_mode: ParseMode = ParseMode.HTML,
-            disable_preview: bool = True,
-            edit: bool = False,
-            message_id: Optional[int] = None
-    ) -> Optional[Message]:
-        """
-        Universal method to send or edit message with optional media.
-
-        Args:
-            chat_id: Chat ID
-            text: Message text
-            media_id: Media file_id or path
-            media_type: 'photo', 'video', 'document', etc.
-            keyboard: Inline keyboard
-            parse_mode: Parse mode (HTML or Markdown)
-            disable_preview: Disable link preview
-            edit: Edit existing message
-            message_id: Message ID to edit
-
-        Returns:
-            Sent/edited Message or None
-        """
-        try:
-            # Edit existing message
-            if edit and message_id:
-                return await self._edit_message(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=text,
-                    keyboard=keyboard,
-                    parse_mode=parse_mode,
-                    disable_preview=disable_preview
-                )
-
-            # Send new message with media
-            if media_id and media_type:
-                return await self._send_media_message(
-                    chat_id=chat_id,
-                    text=text,
-                    media_id=media_id,
-                    media_type=media_type,
-                    keyboard=keyboard,
-                    parse_mode=parse_mode
-                )
-
-            # Send text-only message
-            return await self.bot.send_message(
+            # Send or edit message
+            return await self._send_message(
                 chat_id=chat_id,
                 text=text,
-                reply_markup=keyboard,
+                media_id=media_id,
+                media_type=media_type or "photo" if media_id else None,
+                keyboard=keyboard,
                 parse_mode=parse_mode,
-                disable_web_page_preview=disable_preview
+                disable_preview=disable_preview,
+                edit=edit and not delete_original,
+                message_id=message_id if edit and not delete_original else None
             )
 
-        except TelegramAPIError as e:
-            logger.error(f"Telegram API error: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Error sending message: {e}", exc_info=True)
+            logger.error(f"Error sending template message: {e}", exc_info=True)
+            if isinstance(update, CallbackQuery):
+                await update.answer("Error processing message")
             return None
-
-    async def _send_media_message(
-            self,
-            chat_id: int,
-            text: str,
-            media_id: str,
-            media_type: str,
-            keyboard: Optional[InlineKeyboardMarkup] = None,
-            parse_mode: ParseMode = ParseMode.HTML
-    ) -> Optional[Message]:
-        """Send message with media (photo, video, document)."""
-        try:
-            media_type = media_type.lower()
-
-            if media_type == 'photo':
-                return await self.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=media_id,
-                    caption=text,
-                    reply_markup=keyboard,
-                    parse_mode=parse_mode
-                )
-
-            elif media_type == 'video':
-                return await self.bot.send_video(
-                    chat_id=chat_id,
-                    video=media_id,
-                    caption=text,
-                    reply_markup=keyboard,
-                    parse_mode=parse_mode
-                )
-
-            elif media_type == 'document':
-                return await self.bot.send_document(
-                    chat_id=chat_id,
-                    document=media_id,
-                    caption=text,
-                    reply_markup=keyboard,
-                    parse_mode=parse_mode
-                )
-
-            else:
-                logger.warning(f"Unknown media type: {media_type}, sending as text")
-                return await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode=parse_mode
-                )
-
-        except Exception as e:
-            logger.error(f"Error sending media message: {e}")
-            return None
-
-    async def _edit_message(
-            self,
-            chat_id: int,
-            message_id: int,
-            text: str,
-            keyboard: Optional[InlineKeyboardMarkup] = None,
-            parse_mode: ParseMode = ParseMode.HTML,
-            disable_preview: bool = True
-    ) -> Optional[Message]:
-        """Edit existing message."""
-        try:
-            return await self.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                reply_markup=keyboard,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_preview
-            )
-        except TelegramAPIError as e:
-            if "message is not modified" in str(e).lower():
-                logger.debug("Message content unchanged, skipping edit")
-                return None
-            logger.error(f"Error editing message: {e}")
-            return None
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # CALLBACK QUERY PROCESSING
-    # ═══════════════════════════════════════════════════════════════════════
 
     async def process_callback(
             self,
@@ -393,27 +131,12 @@ class MessageManager:
             media_type: Optional[str] = None,
             execute_preaction: bool = True
     ) -> None:
-        """
-        Process callback query: execute postAction and navigate to next state.
-
-        Args:
-            callback_query: Callback query from button press
-            user: User object
-            current_state: Current template state
-            variables: Variables for templates
-            edit: Edit message instead of sending new
-            delete_original: Delete original message
-            override_media_id: Override media
-            media_type: Override media type
-            execute_preaction: Execute preAction on next state
-        """
         try:
-            # Answer callback to remove loading state
             await callback_query.answer()
 
-            # Execute postAction
-            logger.debug(f"Processing callback: {callback_query.data} for state: {current_state}")
+            logger.debug(f"Processing callback: {callback_query.data} for template: {current_state}")
 
+            # Execute postAction to get next state
             next_state = await self._execute_postaction(
                 callback_query=callback_query,
                 user=user,
@@ -435,11 +158,132 @@ class MessageManager:
                     execute_preaction=execute_preaction
                 )
             else:
-                logger.debug(f"No state transition from postAction")
+                logger.debug(f"No state change (next_state: {next_state}, current_state: {current_state})")
 
         except Exception as e:
             logger.error(f"Error processing callback: {e}", exc_info=True)
             await callback_query.answer("Error processing your request")
+
+    async def _prepare_template(
+            self,
+            user,
+            template_key: Union[str, List[str]],
+            variables: Optional[Dict[str, Any]] = None,
+            override_media_id: Optional[str] = None,
+            media_type: Optional[str] = None,
+            execute_preaction: bool = True
+    ) -> Optional[Tuple]:
+        """
+        Prepare template data for sending.
+
+        Args:
+            user: User object
+            template_key: Template key or list of keys
+            variables: Variables for template
+            override_media_id: Override media ID
+            media_type: Override media type
+            execute_preaction: Whether to execute preAction
+
+        Returns:
+            Tuple: (text, media_id, keyboard, parse_mode, disable_preview, preaction, postaction)
+            or None on failure
+        """
+        try:
+            logger.debug(
+                f"_prepare_template: key={template_key}, "
+                f"vars={list(variables.keys()) if variables else None}, "
+                f"exec_preaction={execute_preaction}"
+            )
+
+            variables = variables.copy() if variables else {}
+
+            # Get first template and preAction
+            first_template, preaction = await self._get_first_template_and_preaction(
+                user=user,
+                template_key=template_key
+            )
+
+            logger.debug(f"First template found: {bool(first_template)}, preAction: {preaction}")
+
+            # Execute preAction if enabled
+            if execute_preaction and preaction:
+                logger.debug(f"Executing preAction: {preaction} with variables={list(variables.keys())}")
+
+                updated_vars = await MessageTemplates.execute_preaction(
+                    preaction, user, variables
+                )
+
+                logger.debug(f"PreAction result: {list(updated_vars.keys()) if updated_vars else None}")
+
+                if updated_vars and isinstance(updated_vars, dict):
+                    # Check if preAction changed template_key
+                    if 'template_key' in updated_vars:
+                        new_template_key = updated_vars.pop('template_key')
+                        if new_template_key:
+                            template_key = new_template_key
+                            logger.debug(f"PreAction {preaction} changed template_key to {template_key}")
+
+                    variables = updated_vars
+
+            # Generate screen using MessageTemplates.generate_screen
+            template_data = await MessageTemplates.generate_screen(
+                user=user,
+                state_keys=template_key,
+                variables=variables
+            )
+
+            if not template_data:
+                return None
+
+            # Unpack: text, media_id, keyboard, parse_mode, disable_preview, preaction, postaction
+            text, media_id, keyboard, parse_mode, disable_preview, _, postaction = template_data
+
+            # Clean invalid media_id (empty strings, whitespace-only)
+            if media_id and not media_id.strip():
+                logger.debug(f"Clearing empty/whitespace media_id for template {template_key}")
+                media_id = None
+
+            # Override media if requested (and it's valid)
+            if override_media_id:
+                if override_media_id.strip():
+                    media_id = override_media_id
+                else:
+                    logger.debug(f"Ignoring empty override_media_id for template {template_key}")
+                    media_id = None
+
+            # Return in CORRECT order
+            return text, media_id, keyboard, parse_mode, disable_preview, preaction, postaction
+
+        except Exception as e:
+            logger.error(f"Error preparing template: {e}", exc_info=True)
+            return None
+
+    async def _get_first_template_and_preaction(
+            self,
+            user,
+            template_key: Union[str, List[str]]
+    ) -> Tuple[Optional[Dict], Optional[str]]:
+        """
+        Get first template and its preAction.
+
+        Args:
+            user: User object
+            template_key: Template key or list of keys
+
+        Returns:
+            Tuple of (template, preaction)
+        """
+        first_template = None
+
+        if isinstance(template_key, list):
+            if template_key:
+                first_key = template_key[0]
+                first_template = await MessageTemplates.get_template(first_key, user.lang)
+        else:
+            first_template = await MessageTemplates.get_template(template_key, user.lang)
+
+        preaction = first_template.get('preAction', '') if first_template else ''
+        return first_template, preaction
 
     async def _execute_postaction(
             self,
@@ -451,11 +295,16 @@ class MessageManager:
         """
         Execute postAction for callback query.
 
+        Args:
+            callback_query: Callback query
+            user: User object
+            template_key: Current template key
+            variables: Optional context variables
+
         Returns:
-            Next state key or None
+            Optional[str]: Next template key or None
         """
         try:
-            # Get template to find postAction
             template_data = await self._prepare_template(
                 user=user,
                 template_key=template_key,
@@ -464,12 +313,15 @@ class MessageManager:
             )
 
             if not template_data:
+                logger.error(f"Failed to prepare template for postAction: {template_key}")
                 return None
 
+            # Unpack to get postaction (last element)
             _, _, _, _, _, _, postaction = template_data
 
             if postaction:
                 context_vars = variables or {}
+
                 logger.info(f"Executing postAction: {postaction} with callback_data: {callback_query.data}")
 
                 next_state = await MessageTemplates.execute_postaction(
@@ -484,6 +336,256 @@ class MessageManager:
         except Exception as e:
             logger.error(f"Error executing postAction: {e}", exc_info=True)
             return None
+
+    async def _send_message(
+            self,
+            chat_id: int,
+            text: str,
+            media_id: Optional[str] = None,
+            media_type: Optional[str] = None,
+            keyboard: Any = None,
+            parse_mode: ParseMode = ParseMode.HTML,
+            disable_preview: bool = True,
+            edit: bool = False,
+            message_id: Optional[int] = None
+    ) -> Optional[Message]:
+        """
+        Universal method to send or edit message with or without media.
+
+        Args:
+            chat_id: Chat ID
+            text: Message text or caption
+            media_id: Optional media file ID
+            media_type: Media type (photo, video)
+            keyboard: Optional inline keyboard
+            parse_mode: Parse mode
+            disable_preview: Disable web preview
+            edit: Whether to edit existing message
+            message_id: ID of message to edit
+
+        Returns:
+            Optional[Message]: Sent or edited message
+        """
+        try:
+            if media_id:
+                return await self._send_media_message(
+                    chat_id=chat_id,
+                    text=text,
+                    media_id=media_id,
+                    media_type=media_type or "photo",
+                    keyboard=keyboard,
+                    parse_mode=parse_mode,
+                    edit=edit,
+                    message_id=message_id
+                )
+            else:
+                return await self._send_text_message(
+                    chat_id=chat_id,
+                    text=text,
+                    keyboard=keyboard,
+                    parse_mode=parse_mode,
+                    disable_preview=disable_preview,
+                    edit=edit,
+                    message_id=message_id
+                )
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return None
+
+    async def _send_text_message(
+            self,
+            chat_id: int,
+            text: str,
+            keyboard: Any = None,
+            parse_mode: ParseMode = ParseMode.HTML,
+            disable_preview: bool = True,
+            edit: bool = False,
+            message_id: Optional[int] = None
+    ) -> Optional[Message]:
+        """
+        Send or edit text message.
+
+        Args:
+            chat_id: Chat ID
+            text: Message text
+            keyboard: Optional inline keyboard
+            parse_mode: Parse mode
+            disable_preview: Whether to disable web preview
+            edit: Whether to edit existing message
+            message_id: ID of message to edit
+
+        Returns:
+            Optional[Message]: Sent or edited message
+        """
+        try:
+            kwargs = {
+                'chat_id': chat_id,
+                'text': text,
+                'parse_mode': parse_mode,
+                'reply_markup': keyboard,
+                'disable_web_page_preview': disable_preview
+            }
+
+            if edit and message_id:
+                kwargs['message_id'] = message_id
+                return await self.bot.edit_message_text(**kwargs)
+            else:
+                return await self.bot.send_message(**kwargs)
+
+        except TelegramAPIError as e:
+            logger.error(f"Error sending text message: {e}")
+
+            if edit and message_id:
+                try:
+                    kwargs.pop('message_id', None)
+                    return await self.bot.send_message(**kwargs)
+                except TelegramAPIError as e2:
+                    logger.error(f"Error sending fallback message: {e2}")
+
+            return None
+
+    async def _send_media_message(
+            self,
+            chat_id: int,
+            text: str,
+            media_id: str,
+            media_type: str = "photo",
+            keyboard: Any = None,
+            parse_mode: ParseMode = ParseMode.HTML,
+            edit: bool = False,
+            message_id: Optional[int] = None
+    ) -> Optional[Message]:
+        """
+        Send or edit media message.
+
+        Args:
+            chat_id: Chat ID
+            text: Caption text
+            media_id: Media file ID or URL
+            media_type: Type of media (photo, video)
+            keyboard: Optional inline keyboard
+            parse_mode: Parse mode
+            edit: Whether to edit existing message
+            message_id: ID of message to edit
+
+        Returns:
+            Optional[Message]: Sent or edited message
+        """
+        try:
+            kwargs = {
+                'chat_id': chat_id,
+                'caption': text,
+                'parse_mode': parse_mode,
+                'reply_markup': keyboard
+            }
+
+            if edit and message_id:
+                media = self._create_input_media(
+                    media_id=media_id,
+                    text=text,
+                    media_type=media_type,
+                    parse_mode=parse_mode
+                )
+
+                return await self.bot.edit_message_media(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    media=media,
+                    reply_markup=keyboard
+                )
+
+            if media_type.lower() == "video":
+                return await self.bot.send_video(
+                    **kwargs,
+                    video=media_id
+                )
+            else:  # Default to photo
+                return await self.bot.send_photo(
+                    **kwargs,
+                    photo=media_id
+                )
+
+        except TelegramAPIError as e:
+            logger.error(f"Error sending media message: {e}")
+
+            try:
+                return await self._send_text_message(
+                    chat_id=chat_id,
+                    text=text,
+                    keyboard=keyboard,
+                    parse_mode=parse_mode,
+                    edit=False  # Always send new message on fallback
+                )
+            except TelegramAPIError as e2:
+                logger.error(f"Error sending fallback text message: {e2}")
+
+            return None
+
+    def _create_input_media(
+            self,
+            media_id: str,
+            text: str,
+            media_type: str,
+            parse_mode: ParseMode
+    ) -> Union[InputMediaPhoto, InputMediaVideo]:
+        """
+        Create InputMedia object for message editing.
+
+        Args:
+            media_id: Media file ID or URL
+            text: Caption text
+            media_type: Type of media (photo, video)
+            parse_mode: Parse mode
+
+        Returns:
+            InputMedia object
+        """
+        if media_type.lower() == "video":
+            return InputMediaVideo(
+                media=media_id,
+                caption=text,
+                parse_mode=parse_mode
+            )
+        else:  # Default to photo
+            return InputMediaPhoto(
+                media=media_id,
+                caption=text,
+                parse_mode=parse_mode
+            )
+
+    def _extract_message_info(self, update: Union[Message, CallbackQuery]) -> Tuple[int, Optional[int]]:
+        """
+        Extract chat_id and message_id from update.
+
+        Args:
+            update: Message or CallbackQuery
+
+        Returns:
+            Tuple of (chat_id, message_id)
+        """
+        if isinstance(update, CallbackQuery):
+            return update.message.chat.id, update.message.message_id
+        else:
+            return update.chat.id, update.message_id
+
+    def _parse_mode_to_enum(self, parse_mode_str: str) -> ParseMode:
+        """
+        Convert string parse mode to aiogram ParseMode enum.
+
+        Args:
+            parse_mode_str: Parse mode as string
+
+        Returns:
+            ParseMode enum value
+        """
+        parse_mode_str = parse_mode_str.upper()
+
+        if parse_mode_str == "MARKDOWN":
+            return ParseMode.MARKDOWN_V2
+        elif parse_mode_str == "MARKDOWNV2":
+            return ParseMode.MARKDOWN_V2
+        else:
+            return ParseMode.HTML
 
     # ═══════════════════════════════════════════════════════════════════════
     # PDF GENERATION (from Talentir)

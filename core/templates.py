@@ -1,18 +1,19 @@
-# jetup/core/templates.py
+# jetup-2/core/templates.py
 """
 Message templates manager for Jetup bot.
-Hybrid version: helpbot's clean architecture + talentir's advanced features.
+Clean architecture from helpbot + Talentir advanced features.
 
 Features:
 - Load templates from Google Sheets
 - Advanced SafeDict with Decimal support
 - Repeating groups (rgroup) for dynamic lists
 - Sequence formatting for carousel/lists
-- preAction/postAction support (via stubs)
+- preAction/postAction support
 """
 import logging
-from typing import Optional, Dict, Tuple, List, Any
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import asyncio
+from typing import Optional, Dict, Tuple, List, Any, Union
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 
 from core.google_services import get_google_services
 from core.utils import SafeDict
@@ -49,10 +50,8 @@ class MessageTemplates:
     @staticmethod
     async def load_templates():
         """Load all templates from Google Sheets to memory cache."""
-        import asyncio
-
         try:
-            # get_google_services() is async and returns SYNC client
+            # get_google_services() returns SYNC client in jetup-2
             sheets_client, _ = await get_google_services()
 
             # Wrap synchronous gspread calls in thread
@@ -115,6 +114,10 @@ class MessageTemplates:
         Returns:
             Template dict or None if not found
         """
+        # Ensure cache is loaded
+        if not MessageTemplates._cache:
+            await MessageTemplates.load_templates()
+
         # Try requested language
         template = MessageTemplates._cache.get((state_key, lang))
 
@@ -128,6 +131,53 @@ class MessageTemplates:
             logger.warning(f"Template '{state_key}' not found (lang: {lang})")
 
         return template
+
+    @staticmethod
+    async def get_raw_template(
+            state_key: str,
+            variables: Dict[str, Any],
+            lang: str = 'en'
+    ) -> Tuple[str, Optional[str]]:
+        """
+        Get raw template without media formatting.
+        Used primarily for notifications.
+
+        Args:
+            state_key: Template identifier
+            variables: Dictionary with variables for substitution
+            lang: Language code (default: 'en')
+
+        Returns:
+            Tuple[str, Optional[str]]: (formatted text, formatted buttons)
+        """
+        # Ensure cache is loaded
+        if not MessageTemplates._cache:
+            await MessageTemplates.load_templates()
+
+        template = MessageTemplates._cache.get((state_key, lang))
+        if not template:
+            template = MessageTemplates._cache.get((state_key, 'en'))
+            if not template:
+                logger.error(
+                    f"Template not found: {state_key}. "
+                    f"Available keys: {list(MessageTemplates._cache.keys())[:10]}"
+                )
+                raise ValueError(f"Template not found: {state_key}")
+
+        text = template['text'].replace('\\n', '\n')
+        buttons = template['buttons']
+
+        # Process rgroup if present in variables
+        if 'rgroup' in variables:
+            text = MessageTemplates.process_repeating_group(text, variables['rgroup'])
+            if buttons:
+                buttons = MessageTemplates.process_repeating_group(buttons, variables['rgroup'])
+
+        # Format with SafeDict
+        formatted_text = text.format_map(SafeDict(variables))
+        formatted_buttons = buttons.format_map(SafeDict(variables)) if buttons else None
+
+        return formatted_text, formatted_buttons
 
     # ═══════════════════════════════════════════════════════════════════════
     # TEXT FORMATTING
@@ -186,7 +236,7 @@ class MessageTemplates:
         return MessageTemplates.format_text(template, formatted_vars)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # REPEATING GROUPS (rgroup) - from Talentir
+    # REPEATING GROUPS (rgroup)
     # ═══════════════════════════════════════════════════════════════════════
 
     @staticmethod
@@ -194,11 +244,27 @@ class MessageTemplates:
         """
         Process repeating groups in template text.
 
+        IMPORTANT: Arrays can have DIFFERENT lengths!
+        - Iteration by MAXIMUM length
+        - Short arrays reuse LAST element for remaining iterations
+
         Syntax: |rgroup:Item template with {placeholders}|
+
+        Example:
+            template_text = "|rgroup:{name} - {price} {emoji}|"
+            rgroup_data = {
+                'name': ['Apple', 'Banana', 'Orange'],  # 3 items
+                'price': ['$1', '$2'],                  # 2 items -> last '$2' reused
+                'emoji': ['🍎']                          # 1 item -> '🍎' reused
+            }
+            Result:
+                Apple - $1 🍎
+                Banana - $2 🍎
+                Orange - $2 🍎
 
         Args:
             template_text: Text with |rgroup:...|
-            rgroup_data: Dict with list values
+            rgroup_data: Dict with list values (can be different lengths!)
 
         Returns:
             Text with repeated sections
@@ -214,19 +280,31 @@ class MessageTemplates:
         item_template = template_text[start + 8:end]
         full_template = template_text[start:end + 1]
 
-        if not rgroup_data or not all(rgroup_data.values()):
+        if not rgroup_data or not any(rgroup_data.values()):
             return template_text.replace(full_template, '')
 
-        # Check that all arrays have the same length
-        lengths = {len(arr) for arr in rgroup_data.values() if isinstance(arr, list)}
-        if len(lengths) != 1:
-            logger.warning(f"Inconsistent rgroup lengths: {lengths}")
+        # Find MAXIMUM length among all arrays
+        max_length = 0
+        for value in rgroup_data.values():
+            if isinstance(value, (list, tuple)) and len(value) > max_length:
+                max_length = len(value)
+
+        if max_length == 0:
             return template_text.replace(full_template, '')
 
+        # Iterate by maximum length
         result = []
-        for i in range(next(iter(lengths))):
-            item_data = {key: values[i] for key, values in rgroup_data.items()}
-            # Format each item with SafeDict
+        for i in range(max_length):
+            item_data = {}
+            for key, values in rgroup_data.items():
+                if isinstance(values, (list, tuple)):
+                    # Use value at index i, or LAST value if out of range
+                    item_data[key] = values[min(i, len(values) - 1)] if values else ''
+                else:
+                    # Scalar value - use as is
+                    item_data[key] = values
+
+            # Format item with SafeDict
             result.append(item_template.format_map(SafeDict(item_data)))
 
         return template_text.replace(full_template, '\n'.join(result))
@@ -290,9 +368,9 @@ class MessageTemplates:
                     if not button or ':' not in button:
                         continue
 
-                    # ═══════════════════════════════════════════════════════
+                    # ═══════════════════════════════════════════════════════════
                     # WEBAPP BUTTON: |webapp|url:Text
-                    # ═══════════════════════════════════════════════════════
+                    # ═══════════════════════════════════════════════════════════
                     if '|webapp|' in button:
                         webapp_parts = button.split(':', 1)
                         webapp_url_part = webapp_parts[0].strip()
@@ -321,7 +399,6 @@ class MessageTemplates:
                                     continue
 
                             try:
-                                from aiogram.types import WebAppInfo
                                 button_row.append(
                                     InlineKeyboardButton(
                                         text=button_text,
@@ -332,9 +409,9 @@ class MessageTemplates:
                             except Exception as e:
                                 logger.error(f"Error creating webapp button: {e}")
 
-                    # ═══════════════════════════════════════════════════════
+                    # ═══════════════════════════════════════════════════════════
                     # URL BUTTON: |url|url:Text
-                    # ═══════════════════════════════════════════════════════
+                    # ═══════════════════════════════════════════════════════════
                     elif '|url|' in button:
                         url_parts = button.split(':', 1)
                         url_part = url_parts[0].strip()
@@ -373,9 +450,9 @@ class MessageTemplates:
                             except Exception as e:
                                 logger.error(f"Error creating url button: {e}")
 
-                    # ═══════════════════════════════════════════════════════
+                    # ═══════════════════════════════════════════════════════════
                     # STANDARD CALLBACK BUTTON: callback_data:Text
-                    # ═══════════════════════════════════════════════════════
+                    # ═══════════════════════════════════════════════════════════
                     callback, text = button.split(':', 1)
                     callback = callback.strip()
                     text = text.strip()
@@ -439,7 +516,110 @@ class MessageTemplates:
         return '\n'.join(all_rows)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ACTIONS (via stubs)
+    # SCREEN GENERATION (CRITICAL METHOD FROM HELPBOT!)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    @classmethod
+    async def generate_screen(
+            cls,
+            user,
+            state_keys: Union[str, List[str]],
+            variables: Optional[Dict[str, Any]] = None
+    ) -> Tuple[str, Optional[str], Optional[InlineKeyboardMarkup], str, bool, Optional[str], Optional[str]]:
+        """
+        Generate screen content from templates.
+
+        This is the MAIN method that combines multiple templates,
+        processes rgroups, formats text, creates keyboards.
+
+        Args:
+            user: User object for localization
+            state_keys: Template key or list of keys
+            variables: Optional dictionary with template variables
+
+        Returns:
+            Tuple[str, Optional[str], Optional[InlineKeyboardMarkup], str, bool, Optional[str], Optional[str]]:
+                - Formatted text
+                - Media ID (if any)
+                - Keyboard (if any)
+                - Parse mode
+                - Disable preview flag
+                - preAction name (if any)
+                - postAction name (if any)
+        """
+        if isinstance(state_keys, str):
+            state_keys = [state_keys]
+
+        templates = []
+
+        # Load cache if needed
+        if not cls._cache:
+            await cls.load_templates()
+
+        # Collect templates
+        for key in state_keys:
+            template = cls._cache.get((key, user.lang)) or cls._cache.get((key, 'en'))
+            if not template:
+                logger.warning(f"Template not found for state {key}")
+                continue
+            templates.append(template)
+
+        if not templates:
+            # Try to get fallback template
+            fallback = cls._cache.get(('fallback', user.lang)) or cls._cache.get(('fallback', 'en'))
+            if fallback:
+                templates = [fallback]
+            else:
+                logger.error("Fallback template not found")
+                return "Template not found", None, None, "HTML", True, None, None
+
+        try:
+            texts = []
+            buttons_list = []
+            format_vars = (variables or {}).copy()
+
+            # Add user to context for direct access to attributes
+            format_vars['user'] = user
+
+            # Process each template
+            for template in templates:
+                text = template['text'].replace('\\n', '\n')
+
+                # Process rgroup if present in variables
+                if 'rgroup' in format_vars:
+                    text = cls.process_repeating_group(text, format_vars['rgroup'])
+
+                # Format with SafeDict
+                text = text.format_map(SafeDict(format_vars))
+                texts.append(text)
+
+                # Collect buttons
+                if template['buttons']:
+                    buttons_list.append(template['buttons'])
+
+            # Combine texts
+            final_text = '\n\n'.join(text for text in texts if text)
+
+            # Merge and create keyboard
+            merged_buttons = cls.merge_buttons(buttons_list)
+            keyboard = cls.create_keyboard(merged_buttons, variables=format_vars)
+
+            # Get metadata from first template
+            first_template = templates[0]
+            media_id = first_template['mediaID'] if first_template.get('mediaType') != 'None' else None
+            parse_mode = first_template['parseMode']
+            disable_preview = first_template['disablePreview']
+            pre_action = first_template.get('preAction', '') if first_template.get('preAction') else None
+            post_action = first_template.get('postAction', '') if first_template.get('postAction') else None
+
+            return final_text, media_id, keyboard, parse_mode, disable_preview, pre_action, post_action
+
+        except Exception as e:
+            logger.error(f"Error generating screen: {e}", exc_info=True)
+            return f"Error generating screen: {str(e)}", None, None, "HTML", True, None, None
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ACTIONS (via loader)
     # ═══════════════════════════════════════════════════════════════════════
 
     @staticmethod
