@@ -5,6 +5,7 @@ Handles user registration, EULA acceptance, and channel subscription checks.
 """
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
@@ -13,7 +14,11 @@ from sqlalchemy.orm import Session
 from models.user import User
 from models.payment import Payment
 from services.user_domain.auth_service import AuthService
+from services.stats_service import StatsService
+from mlm_system.services.rank_service import RankService
+from mlm_system.config.ranks import RANK_CONFIG, Rank
 from core.message_manager import MessageManager
+from core.di import get_service
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -24,7 +29,7 @@ start_router = Router(name="start_router")
 @start_router.message(CommandStart())
 async def cmd_start(
         message: Message,
-        user: User,
+        user: User,  # Can be None for new users (injected by middleware)
         session: Session,
         bot: Bot,
         message_manager: MessageManager
@@ -50,11 +55,8 @@ async def cmd_start(
     # Extract payload from /start command
     start_payload = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None
 
-    # Check if user exists
-    existing_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
-
     # If user doesn't exist - register with referral
-    if not existing_user:
+    if not user:
         referrer_id = None
 
         if start_payload and start_payload.isdigit():
@@ -74,9 +76,6 @@ async def cmd_start(
             logger.error(f"User registration failed: {e}")
             await message.answer("⚠️ System configuration error. Please contact support.")
             return
-
-        # Refresh user object after commit
-        user = session.query(User).filter_by(telegramID=message.from_user.id).first()
 
     # ========================================================================
     # DEEP LINK PAYLOADS - Process before welcome flow
@@ -168,7 +167,7 @@ async def show_eula_screen(
     """Show EULA acceptance screen for new users."""
     await message_manager.send_template(
         user=user,
-        template_key='welcome_screen',
+        template_key='/dashboard/newUser',
         update=message_or_callback,
         variables={
             'firstname': user.firstname or 'User'
@@ -189,7 +188,7 @@ async def show_subscription_prompt(
 
     await message_manager.send_template(
         user=user,
-        template_key='channels_check',
+        template_key='/dashboard/noSubscribe',
         update=message_or_callback,
         variables={
             'firstname': user.firstname or 'User',
@@ -209,9 +208,81 @@ async def show_dashboard(
         message_manager: MessageManager,
         session: Session
 ):
-    """Show main dashboard screen."""
-    # Determine dashboard template based on user state
-    template_keys = ['dashboard']
+    """Show main dashboard screen with full statistics."""
+    # ========================================================================
+    # GET SERVICES
+    # ========================================================================
+    stats_service = get_service(StatsService)
+
+    # ========================================================================
+    # GLOBAL STATISTICS
+    # ========================================================================
+    projects_count = 0
+    users_count = 0
+    purchases_total = 0
+
+    if stats_service:
+        try:
+            projects_count = await stats_service.get_projects_count()
+            users_count = await stats_service.get_users_count()
+            purchases_total = await stats_service.get_purchases_total()
+        except Exception as e:
+            logger.error(f"Error getting global stats: {e}")
+
+    # ========================================================================
+    # USER STATISTICS
+    # ========================================================================
+    upline_count = 0
+    upline_total = 0
+    user_purchases_total = Decimal("0")
+
+    if stats_service:
+        try:
+            # Direct referrals
+            upline_count = await stats_service.get_user_referrals_count(
+                user.telegramID,
+                direct_only=True
+            )
+
+            # All referrals (recursive)
+            upline_total = await stats_service.get_user_referrals_count(
+                user.telegramID,
+                direct_only=False
+            )
+
+            # User's total purchases
+            user_purchases_total = await stats_service.get_user_purchases_total(user.userID)
+
+        except Exception as e:
+            logger.error(f"Error getting user stats: {e}")
+
+    # ========================================================================
+    # MLM DATA
+    # ========================================================================
+    rank_display = "Старт"
+    monthly_pv = Decimal("0")
+
+    try:
+        rank_service = RankService(session)
+        active_rank = await rank_service.getUserActiveRank(user.userID)
+
+        # Get rank display name
+        try:
+            rank_display = RANK_CONFIG.get(Rank(active_rank), {}).get("displayName", active_rank)
+        except (ValueError, KeyError):
+            rank_display = active_rank
+
+        # Get monthly PV
+        if user.mlmVolumes:
+            monthly_pv = Decimal(str(user.mlmVolumes.get("monthlyPV", "0")))
+
+    except Exception as e:
+        logger.error(f"Error getting MLM data: {e}")
+
+    # ========================================================================
+    # DETERMINE TEMPLATE KEYS
+    # ========================================================================
+    template_keys = ['/dashboard/existingUser']
 
     # Add additional template if user data not filled
     if not user.isFilled:
@@ -219,12 +290,39 @@ async def show_dashboard(
     elif user.isFilled and not user.emailConfirmed:
         template_keys.append('settings_filled_unconfirmed')
 
+    # ========================================================================
+    # SEND DASHBOARD
+    # ========================================================================
     await message_manager.send_template(
         user=user,
         template_key=template_keys,
         update=message_or_callback,
         variables={
-            'firstname': user.firstname or 'User'
+            # User info
+            'firstname': user.firstname or 'User',
+            'language': user.lang or 'en',
+            'email': user.email or '',
+
+            # Balances
+            'balanceActive': float(user.balanceActive or 0),
+            'balancePassive': float(user.balancePassive or 0),
+            'balance': float((user.balanceActive or 0) + (user.balancePassive or 0)),
+
+            # Global statistics
+            'projectsCount': projects_count,
+            'usersCount': users_count,
+            'purchasesTotal': purchases_total,
+
+            # User statistics
+            'userPurchasesTotal': float(user_purchases_total),
+            'uplineCount': upline_count,
+            'uplineTotal': upline_total,
+
+            # MLM data
+            'rank': rank_display,
+            'isActive': user.isActive,
+            'monthlyPV': float(monthly_pv),
+            'teamVolumeTotal': float(user.teamVolumeTotal or 0)
         },
         delete_original=isinstance(message_or_callback, CallbackQuery)
     )

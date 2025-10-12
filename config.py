@@ -219,7 +219,13 @@ class Config:
     @classmethod
     async def initialize_dynamic_from_sheets(cls) -> None:
         """
-        Load dynamic configuration from Google Sheets.
+        Load dynamic configuration and data from Google Sheets.
+
+        This method:
+        1. Loads configuration variables from Config sheet
+        2. Imports Projects and Options data
+        3. Initializes StatsService for caching metrics
+
         Merges with .env configuration, Google Sheets values take precedence.
 
         Expected Config sheet format:
@@ -230,7 +236,13 @@ class Config:
         """
         try:
             from services.data_importer import ConfigImporter
+            from services.imports import import_projects_and_options
+            from services.stats_service import StatsService
+            from core.di import register_service
 
+            # ========================================================================
+            # STEP 1: Load configuration variables
+            # ========================================================================
             logger.info("Loading dynamic configuration from Google Sheets...")
             config_dict = await ConfigImporter.import_config()
 
@@ -265,11 +277,57 @@ class Config:
                 for update in updates:
                     logger.info(f"  - {update}")
 
-            logger.info("✓ Dynamic configuration loaded successfully")
+            logger.info("✓ Configuration variables loaded")
+
+            # ========================================================================
+            # STEP 2: Import Projects and Options
+            # ========================================================================
+            logger.info("Importing Projects and Options from Google Sheets...")
+            import_result = await import_projects_and_options()
+
+            if import_result["success"]:
+                logger.info(
+                    f"✓ Projects: "
+                    f"added={import_result['projects']['added']}, "
+                    f"updated={import_result['projects']['updated']}, "
+                    f"errors={import_result['projects']['errors']}"
+                )
+                logger.info(
+                    f"✓ Options: "
+                    f"added={import_result['options']['added']}, "
+                    f"updated={import_result['options']['updated']}, "
+                    f"errors={import_result['options']['errors']}"
+                )
+
+                # Log errors if any
+                if import_result["error_messages"]:
+                    logger.warning(f"Import errors: {len(import_result['error_messages'])}")
+                    for error_msg in import_result["error_messages"][:3]:
+                        logger.warning(f"  - {error_msg}")
+                    if len(import_result["error_messages"]) > 3:
+                        logger.warning(f"  ... and {len(import_result['error_messages']) - 3} more")
+            else:
+                logger.error("⚠️ Projects/Options import failed")
+                for error_msg in import_result["error_messages"][:5]:
+                    logger.error(f"  - {error_msg}")
+
+            # ========================================================================
+            # STEP 3: Initialize StatsService
+            # ========================================================================
+            logger.info("Initializing statistics service...")
+            stats_service = StatsService()
+            await stats_service.initialize()
+            register_service(StatsService, stats_service)
+            logger.info("✓ StatsService initialized and registered")
+
+            logger.info("=" * 60)
+            logger.info("✅ DYNAMIC CONFIGURATION LOADED SUCCESSFULLY")
+            logger.info("=" * 60)
 
         except Exception as e:
             logger.error(f"Failed to load dynamic configuration: {e}", exc_info=True)
             logger.warning("⚠️ Continuing with .env configuration only")
+            # Don't raise - allow bot to start with basic configuration
 
     @classmethod
     def get(cls, key: str, default: Any = None) -> Any:

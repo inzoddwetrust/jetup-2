@@ -40,6 +40,8 @@ class ConfigImporter:
         Raises:
             Exception: If unable to load configuration
         """
+        import asyncio
+
         try:
             sheet_id = sheet_id or Config.get(Config.GOOGLE_SHEET_ID)
             if not sheet_id:
@@ -47,15 +49,17 @@ class ConfigImporter:
 
             logger.info(f"Loading configuration from Google Sheets: {sheet_id}/{sheet_name}")
 
-            # Get Google Sheets client
+            # Get Google Sheets client (async call, returns SYNC client)
             sheets_client, _ = await get_google_services()
 
-            # Open spreadsheet and worksheet
-            spreadsheet = sheets_client.open_by_key(sheet_id)
-            sheet = spreadsheet.worksheet(sheet_name)
+            # Wrap synchronous gspread calls in thread
+            def _load_from_sheets():
+                spreadsheet = sheets_client.open_by_key(sheet_id)
+                sheet = spreadsheet.worksheet(sheet_name)
+                return sheet.get_all_records()
 
-            # Get all records
-            records = sheet.get_all_records()
+            # Execute in thread to avoid blocking
+            records = await asyncio.to_thread(_load_from_sheets)
 
             if not records:
                 logger.warning(f"{sheet_name} sheet is empty or has no valid records")
@@ -105,6 +109,16 @@ class ConfigImporter:
 
         Returns:
             Parsed value with correct type
+
+        Examples:
+            >>> ConfigImporter.parse_config_value("CHANNELS", '[{"id": 1}]')
+            [{"id": 1}]
+
+            >>> ConfigImporter.parse_config_value("ENABLED", "true")
+            True
+
+            >>> ConfigImporter.parse_config_value("COUNT", "42")
+            42
         """
         # Handle empty or None values
         if value is None or value == '':

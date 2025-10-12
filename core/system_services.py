@@ -87,8 +87,12 @@ async def setup_resources(bot: Bot) -> 'MessageManager':
     Returns:
         MessageManager: Initialized message manager
     """
+    import traceback
+
     # Import here to avoid circular dependencies
     from core.templates import MessageTemplates
+    from core.message_manager import MessageManager
+    from core.di import register_service
 
     # Load templates from Google Sheets
     try:
@@ -112,13 +116,15 @@ async def setup_resources(bot: Bot) -> 'MessageManager':
         logger.error(f"Failed to initialize action system: {e}")
 
     # Create message manager
-    # TODO: Import MessageManager when ready
-    # from core.message_manager import MessageManager
-    # message_manager = MessageManager(bot)
-    # return message_manager
+    logger.info("Creating message manager...")
+    message_manager = MessageManager(bot)
+
+    # Register in DI container
+    register_service(MessageManager, message_manager)
+    logger.info("✓ Message manager registered in DI")
 
     logger.info("✓ Resources setup complete")
-    return None  # Temporary until MessageManager is ready
+    return message_manager
 
 
 async def get_bot_info(bot: Bot) -> Dict[str, Any]:

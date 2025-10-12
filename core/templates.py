@@ -11,7 +11,6 @@ Features:
 - preAction/postAction support (via stubs)
 """
 import logging
-import re
 from typing import Optional, Dict, Tuple, List, Any
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -48,43 +47,40 @@ class MessageTemplates:
         return cls._sheet_client
 
     @staticmethod
-    async def load_templates() -> None:
-        """
-        Load all templates from Google Sheets to memory cache.
+    async def load_templates():
+        """Load all templates from Google Sheets to memory cache."""
+        import asyncio
 
-        Expected sheet format:
-        | stateKey | lang | preAction | text | buttons | postAction | parseMode | disablePreview | mediaType | mediaID |
-
-        Raises:
-            Exception: If loading fails
-        """
         try:
+            # get_google_services() is async and returns SYNC client
             sheets_client, _ = await get_google_services()
-            sheet_id = Config.get(Config.GOOGLE_SHEET_ID)
-            spreadsheet = await sheets_client.open_by_key(sheet_id)
-            sheet = await spreadsheet.worksheet("Templates")
-            rows = await sheet.get_all_records()
 
-            # Build cache
-            new_cache = {}
-            for row in rows:
-                key = (row['stateKey'], row['lang'])
-                new_cache[key] = {
+            # Wrap synchronous gspread calls in thread
+            def _load_from_sheets():
+                spreadsheet = sheets_client.open_by_key(Config.get(Config.GOOGLE_SHEET_ID))
+                sheet = spreadsheet.worksheet("Templates")
+                return sheet.get_all_records()
+
+            # Execute in thread to avoid blocking
+            rows = await asyncio.to_thread(_load_from_sheets)
+
+            new_cache = {
+                (row['stateKey'], row['lang']): {
                     'preAction': row.get('preAction', ''),
                     'text': row['text'],
-                    'buttons': row.get('buttons', ''),
+                    'buttons': row['buttons'],
                     'postAction': row.get('postAction', ''),
-                    'parseMode': row.get('parseMode', 'HTML'),
-                    'disablePreview': MessageTemplates._parse_boolean(row.get('disablePreview', False)),
-                    'mediaType': row.get('mediaType', ''),
-                    'mediaID': row.get('mediaID', '')
-                }
+                    'parseMode': row['parseMode'],
+                    'disablePreview': MessageTemplates._parse_boolean(row['disablePreview']),
+                    'mediaType': row['mediaType'],
+                    'mediaID': row['mediaID']
+                } for row in rows
+            }
 
             MessageTemplates._cache = new_cache
-            logger.info(f"✓ Loaded {len(rows)} templates from Google Sheets")
-
+            logger.info(f"Loaded {len(rows)} templates from Google Sheets")
         except Exception as e:
-            logger.error(f"Failed to load templates: {e}")
+            logger.error(f"Failed to load templates: {e}", exc_info=True)
             raise
 
     @staticmethod
@@ -148,10 +144,6 @@ class MessageTemplates:
 
         Returns:
             Formatted text
-
-        Example:
-            >>> format_text("Price: {price:.2f}", {"price": Decimal("123.456")})
-            "Price: 123.46"
         """
         try:
             return template.format_map(SafeDict(variables))
@@ -178,14 +170,6 @@ class MessageTemplates:
 
         Returns:
             Formatted string
-
-        Example:
-            >>> variables = {
-            ...     "title": ["Project 1", "Project 2", "Project 3"],
-            ...     "price": [100, 200, 300]
-            ... }
-            >>> sequence_format("{title}: ${price}", variables, sequence_index=1)
-            "Project 2: $200"
         """
         formatted_vars = {}
 
@@ -210,62 +194,42 @@ class MessageTemplates:
         """
         Process repeating groups in template text.
 
-        Syntax in template:
-            {{rgroup}}
-            Name: {name}
-            Value: {value}
-            {{/rgroup}}
+        Syntax: |rgroup:Item template with {placeholders}|
 
         Args:
-            template_text: Template with {{rgroup}}...{{/rgroup}} blocks
-            rgroup_data: Dictionary with list values for each key
+            template_text: Text with |rgroup:...|
+            rgroup_data: Dict with list values
 
         Returns:
             Text with repeated sections
-
-        Example:
-            >>> template = "Team:\\n{{rgroup}}\\n- {name}: {volume}\\n{{/rgroup}}"
-            >>> data = {
-            ...     "name": ["Alice", "Bob", "Charlie"],
-            ...     "volume": [1000, 2000, 1500]
-            ... }
-            >>> process_repeating_group(template, data)
-            "Team:\\n- Alice: 1000\\n- Bob: 2000\\n- Charlie: 1500\\n"
         """
-        # Find rgroup blocks
-        rgroup_pattern = r'\{\{rgroup\}\}(.*?)\{\{/rgroup\}\}'
-        matches = re.finditer(rgroup_pattern, template_text, re.DOTALL)
+        start = template_text.find('|rgroup:')
+        if start == -1:
+            return template_text
 
-        result = template_text
+        end = template_text.find('|', start + 8)
+        if end == -1:
+            return template_text
 
-        for match in matches:
-            block_template = match.group(1)
+        item_template = template_text[start + 8:end]
+        full_template = template_text[start:end + 1]
 
-            # Get length of lists (all should be same length)
-            list_length = 0
-            if rgroup_data:
-                first_list = next(iter(rgroup_data.values()))
-                if isinstance(first_list, list):
-                    list_length = len(first_list)
+        if not rgroup_data or not all(rgroup_data.values()):
+            return template_text.replace(full_template, '')
 
-            # Repeat block for each item
-            repeated_blocks = []
-            for i in range(list_length):
-                item_vars = {}
-                for key, values in rgroup_data.items():
-                    if isinstance(values, list) and i < len(values):
-                        item_vars[key] = values[i]
-                    else:
-                        item_vars[key] = values
+        # Check that all arrays have the same length
+        lengths = {len(arr) for arr in rgroup_data.values() if isinstance(arr, list)}
+        if len(lengths) != 1:
+            logger.warning(f"Inconsistent rgroup lengths: {lengths}")
+            return template_text.replace(full_template, '')
 
-                # Format this block
-                formatted_block = MessageTemplates.format_text(block_template, item_vars)
-                repeated_blocks.append(formatted_block)
+        result = []
+        for i in range(next(iter(lengths))):
+            item_data = {key: values[i] for key, values in rgroup_data.items()}
+            # Format each item with SafeDict
+            result.append(item_template.format_map(SafeDict(item_data)))
 
-            # Replace {{rgroup}}...{{/rgroup}} with repeated content
-            result = result.replace(match.group(0), ''.join(repeated_blocks))
-
-        return result
+        return template_text.replace(full_template, '\n'.join(result))
 
     # ═══════════════════════════════════════════════════════════════════════
     # KEYBOARD CREATION

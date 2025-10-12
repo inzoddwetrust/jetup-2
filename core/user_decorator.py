@@ -19,7 +19,22 @@ logger = logging.getLogger(__name__)
 class UserMiddleware(BaseMiddleware):
     """
     Middleware for automatically getting user objects and injecting them into handlers.
+    Also injects bot and message_manager from DI.
+
+    NOTE: This middleware does NOT create users automatically.
+    User creation is handled by handlers (e.g., /start with referral support).
+    If user doesn't exist, user will be None in handler data.
     """
+
+    def __init__(self, bot=None):
+        """
+        Initialize middleware.
+
+        Args:
+            bot: Bot instance (optional, for backwards compatibility)
+        """
+        self.bot = bot
+        super().__init__()
 
     async def __call__(
             self,
@@ -28,6 +43,8 @@ class UserMiddleware(BaseMiddleware):
             data: dict[str, Any]
     ) -> Any:
         """Process event and inject user data."""
+        from core.di import get_service
+        from core.message_manager import MessageManager
 
         # Get telegram user
         telegram_user = None
@@ -38,14 +55,28 @@ class UserMiddleware(BaseMiddleware):
             logger.warning("No telegram user found in event")
             return await handler(event, data)
 
-        # Get or create user in database
+        # Get database session
         session = get_session()
-        try:
-            user = User.get_or_create(session, telegram_user)
 
-            # Inject into data
+        try:
+            # Try to get existing user (DO NOT create)
+            user = session.query(User).filter_by(telegramID=telegram_user.id).first()
+
+            if not user:
+                logger.debug(f"User {telegram_user.id} not found in database (will be created by handler if needed)")
+
+            # Inject user and session
             data['user'] = user
             data['session'] = session
+
+            # Inject bot (from __init__ or data)
+            if self.bot:
+                data['bot'] = self.bot
+
+            # Inject message_manager from DI
+            message_manager = get_service(MessageManager)
+            if message_manager:
+                data['message_manager'] = message_manager
 
             # Call handler
             result = await handler(event, data)
@@ -81,36 +112,14 @@ def with_user(func: Callable = None):
             await message.answer(f"Hello {user.firstname}!")
     """
 
-    def decorator(handler: Callable) -> Callable:
-        @functools.wraps(handler)
+    def decorator(handler_func: Callable) -> Callable:
+        @functools.wraps(handler_func)
         async def wrapper(*args, **kwargs):
-            # Extract user and session from kwargs (injected by middleware)
-            user = kwargs.get('user')
-            session = kwargs.get('session')
-
-            if not user:
-                logger.error(f"User not found in handler {handler.__name__}")
-                return None
-
-            # Old style: user as first positional argument
-            # Find Message or CallbackQuery in args
-            message_or_callback = None
-            for arg in args:
-                if isinstance(arg, (Message, CallbackQuery)):
-                    message_or_callback = arg
-                    break
-
-            if message_or_callback:
-                # Call with user as first arg (old style)
-                return await handler(user, message_or_callback, session=session, **kwargs)
-            else:
-                # Call normally (new style)
-                return await handler(*args, user=user, session=session, **kwargs)
+            # User is already injected by middleware
+            return await handler_func(*args, **kwargs)
 
         return wrapper
 
-    # Support both @with_user and @with_user()
     if func is None:
         return decorator
-    else:
-        return decorator(func)
+    return decorator(func)

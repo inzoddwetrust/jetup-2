@@ -97,8 +97,8 @@ async def initialize_bot():
         # STEP 5: Setup middleware
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("🔧 Setting up middleware...")
-        dp.message.middleware(UserMiddleware())
-        dp.callback_query.middleware(UserMiddleware())
+        dp.message.middleware(UserMiddleware(bot))
+        dp.callback_query.middleware(UserMiddleware(bot))
         logger.info("✓ Middleware configured")
 
         # ═══════════════════════════════════════════════════════════════════════
