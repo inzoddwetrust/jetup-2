@@ -35,4 +35,4 @@ class PassiveBalance(Base, AuditMixin):
     user = relationship('User', backref='passive_balance_transactions')
 
     def __repr__(self):
-        return f"<PassiveBalance(id={self.passiveBalanceID}, user={self.userID}, amount={self.amount})>"
+        return f"<PassiveBalance(id={self.paymentID}, user={self.userID}, amount={self.amount})>"

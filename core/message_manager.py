@@ -507,14 +507,26 @@ class MessageManager:
 
         except TelegramAPIError as e:
             logger.error(f"Error sending media message: {e}")
-
             try:
+                # If media failed and edit was requested:
+                # Can't edit media message as text message in Telegram API!
+                # Must delete old and send new
+                if edit and message_id:
+                    try:
+                        await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                        logger.debug(f"Deleted failed media message {message_id}")
+                    except Exception as delete_error:
+                        logger.warning(f"Failed to delete broken media message: {delete_error}")
+
+                # Send new text message (not edit)
                 return await self._send_text_message(
                     chat_id=chat_id,
                     text=text,
                     keyboard=keyboard,
                     parse_mode=parse_mode,
-                    edit=False  # Always send new message on fallback
+                    disable_preview=True,
+                    edit=False,  # Can't edit media as text
+                    message_id=None
                 )
             except TelegramAPIError as e2:
                 logger.error(f"Error sending fallback text message: {e2}")

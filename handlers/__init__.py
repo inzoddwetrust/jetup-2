@@ -8,6 +8,7 @@ from aiogram import Dispatcher, Bot
 from handlers.start import start_router
 from handlers.projects import projects_router
 from handlers.admin import setup_admin_handlers
+from handlers.fallback import fallback_router
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ def register_all_handlers(dp: Dispatcher, bot: Bot):
 
     # Register admin handlers with middleware
     setup_admin_handlers(dp, bot)
+    dp.include_router(fallback_router)
 
     logger.info("All handlers registered")
 

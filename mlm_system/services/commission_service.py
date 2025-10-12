@@ -242,12 +242,29 @@ class CommissionService:
         # createdAt and updatedAt are handled by AuditMixin defaults
 
         self.session.add(bonus)
+        self.session.flush()  # Get bonus.bonusID
 
         # Update user's passive balance
         user.balancePassive = (user.balancePassive or Decimal("0")) + commissionData["amount"]
+
+        # Create PassiveBalance transaction record
+        from models.passive_balance import PassiveBalance
+
+        passive_record = PassiveBalance()
+        passive_record.userID = commissionData["userId"]
+        passive_record.firstname = user.firstname
+        passive_record.surname = user.surname
+        passive_record.amount = commissionData["amount"]
+        passive_record.status = 'done'
+        passive_record.reason = f'bonus={bonus.bonusID}'
+        passive_record.link = ''
+        passive_record.notes = f'{commissionData.get("commissionType", "differential")} level {commissionData["level"]}'
+
+        self.session.add(passive_record)
+
         logger.info(
             f"Updated passive balance for user {user.userID}: "
-            f"+{commissionData['amount']}"
+            f"+{commissionData['amount']} (bonus {bonus.bonusID})"
         )
 
     async def processReferralBonus(self, purchase: Purchase) -> Optional[Dict]:

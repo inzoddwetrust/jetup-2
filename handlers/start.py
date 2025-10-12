@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy.orm import Session
 
@@ -562,3 +563,36 @@ async def handle_email_verification(
             template_key='/dashboard/emailverif_invalid',
             update=message
         )
+
+
+@start_router.callback_query(F.data == "/dashboard/existingUser")
+async def back_to_dashboard(
+        callback_query: CallbackQuery,
+        user: User,
+        session: Session,
+        bot: Bot,
+        message_manager: MessageManager,
+        state: FSMContext
+):
+    """Return to main dashboard from any screen."""
+    logger.info(f"User {user.telegramID} returning to dashboard")
+
+    # Delete current message
+    try:
+        await callback_query.message.delete()
+    except Exception as e:
+        logger.warning(f"Failed to delete message: {e}")
+
+    # Clear FSM state (safe even if state=None after restart)
+    await state.clear()
+
+    # Show welcome screen (handles EULA, subscriptions, dashboard)
+    auth_service = AuthService(session)
+    await show_welcome_screen(
+        user=user,
+        message_or_callback=callback_query,
+        session=session,
+        bot=bot,
+        message_manager=message_manager,
+        auth_service=auth_service
+    )
