@@ -5,7 +5,7 @@ Loads from .env and Google Sheets, validates critical keys.
 """
 import os
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,8 @@ class Config:
         logger.info("Loading configuration from environment...")
 
         try:
+            import json  # ← Добавь в начало метода
+
             # Telegram
             cls._config[cls.API_TOKEN] = os.getenv("API_TOKEN")
 
@@ -161,13 +163,12 @@ class Config:
                 os.getenv("DEFAULT_REFERRER_ID", "526738615")
             )
 
-            # Channels
-            channels_str = os.getenv("REQUIRED_CHANNELS", "")
-            if channels_str:
-                cls._config[cls.REQUIRED_CHANNELS] = [
-                    ch.strip() for ch in channels_str.split(',')
-                ]
-            else:
+            # Channels (JSON format!)
+            channels_str = os.getenv("REQUIRED_CHANNELS", "[]")
+            try:
+                cls._config[cls.REQUIRED_CHANNELS] = json.loads(channels_str)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse REQUIRED_CHANNELS JSON: {e}")
                 cls._config[cls.REQUIRED_CHANNELS] = []
 
             # System
@@ -180,6 +181,25 @@ class Config:
         except Exception as e:
             logger.error(f"Failed to load configuration: {e}")
             raise ConfigurationError(f"Configuration loading failed: {e}")
+
+    @classmethod
+    def get_channels_by_lang(cls, lang: str) -> List[Dict[str, str]]:
+        """
+        Get required channels filtered by language.
+
+        Args:
+            lang: Language code (en, de, ru)
+
+        Returns:
+            List of channel dicts for specified language
+
+        Example:
+            >>> channels = Config.get_channels_by_lang('ru')
+            >>> for ch in channels:
+            ...     print(ch['title'], ch['url'])
+        """
+        all_channels = cls.get(cls.REQUIRED_CHANNELS, [])
+        return [ch for ch in all_channels if ch.get('lang') == lang]
 
     @classmethod
     async def validate_critical_keys(cls) -> None:
