@@ -140,7 +140,7 @@ async def my_certificates(
         )
         return
 
-    # Aggregate by project and keep first purchase ID
+    # Aggregate by project
     project_aggregates = {}
     for purchase in purchases:
         project_id = purchase.projectID
@@ -149,35 +149,42 @@ async def my_certificates(
                 'projectName': purchase.projectName,
                 'total_qty': 0,
                 'total_price': 0,
-                'first_purchase_id': purchase.purchaseID  # Keep first purchase ID for certificate
+                'latest_date': purchase.createdAt  # ДОБАВЛЕНО: дата последней покупки
             }
         project_aggregates[project_id]['total_qty'] += purchase.packQty
         project_aggregates[project_id]['total_price'] += purchase.packPrice
 
+        # ДОБАВЛЕНО: обновляем дату если текущая покупка новее
+        if purchase.createdAt > project_aggregates[project_id]['latest_date']:
+            project_aggregates[project_id]['latest_date'] = purchase.createdAt
+
     # Get bot username for deep links
     bot_username = Config.get(Config.BOT_USERNAME)
 
-    # Build certificate links
+    # Build certificate links and data lists
     cert_links = []
     project_names = []
     total_shares = []
     total_amounts = []
+    dates = []  # ДОБАВЛЕНО: список дат
 
     for project_id, data in project_aggregates.items():
-        # Use first purchase ID for certificate generation
-        link = f"https://t.me/{bot_username}?start=certificate_{data['first_purchase_id']}"
+        link = f"https://t.me/{bot_username}?start=certificate_{project_id}"
         cert_links.append(f"<a href='{link}'>PDF</a>")
+
         project_names.append(data['projectName'])
         total_shares.append(data['total_qty'])
         total_amounts.append(float(data['total_price']))
+        dates.append(data['latest_date'].strftime('%Y-%m-%d'))  # ДОБАВЛЕНО: форматируем дату
 
-    # Use rgroup
+    # Use rgroup for repeating rows
     context = {
         "rgroup": {
             'i': list(range(1, len(project_aggregates) + 1)),
             'projectName': project_names,
             'shares': total_shares,
-            'amount': total_amounts,
+            'price': total_amounts,  # ИСПРАВЛЕНО: было 'amount', стало 'price'
+            'date': dates,  # ДОБАВЛЕНО: массив дат
             'PDF': cert_links
         }
     }
@@ -216,7 +223,7 @@ async def show_strategies(
     )
 
 
-@portfolio_router.callback_query(F.data.startswith("strategy_"))
+@portfolio_router.callback_query(F.data.startswith("/case/strategies/set_"))
 async def select_strategy(
         callback_query: CallbackQuery,
         user: User,
@@ -224,16 +231,13 @@ async def select_strategy(
         message_manager: MessageManager
 ):
     """Handle strategy selection."""
-    strategy_key = callback_query.data.split("_")[1]  # manual, safe, aggressive, risky
+    # Extract strategy key from callback data: /case/strategies/set_manual -> manual
+    strategy_key = callback_query.data.split("_")[1]
 
     logger.info(f"User {user.userID} selecting strategy: {strategy_key}")
 
     # Get current strategy
     current_strategy = user.settings.get('strategy', 'manual') if user.settings else 'manual'
-
-    # Check if already selected - just ignore click
-    if current_strategy == strategy_key:
-        return
 
     # Update strategy in settings JSON
     if not user.settings:
@@ -249,13 +253,23 @@ async def select_strategy(
 
     logger.info(f"User {user.userID} strategy updated to: {strategy_key}")
 
+    # Check if already selected - show answer popup
+    if current_strategy == strategy_key:
+        await callback_query.answer("This strategy is already selected")
+        return
+
     # Show updated strategy screen
-    await message_manager.send_template(
-        user=user,
-        template_key=['/case/strategies', f'/case/strategies/{strategy_key}'],
-        update=callback_query,
-        edit=True
-    )
+    template_keys = ['/case/strategies', f'/case/strategies/{strategy_key}']
+
+    try:
+        await message_manager.send_template(
+            user=user,
+            template_key=template_keys,
+            update=callback_query,
+            edit=True
+        )
+    except Exception as e:
+        logger.warning(f"Error updating strategy message: {e}")
 
 
 # ============================================================================

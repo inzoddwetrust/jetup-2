@@ -491,15 +491,64 @@ async def handle_purchase_deep_link(
 ):
     """
     Handle /start purchase_ID deep link.
-    Generates purchase document.
+    Generates purchase agreement document.
+
+    Flow:
+    1. Get purchase_id from deep link
+    2. Call generate_document() with purchase_id
+    3. Send PDF to user
     """
     logger.info(f"Purchase document deep link: user={user.telegramID}, purchase={purchase_id}")
 
-    # TODO: Import and call generate_document when ready
-    # from services.document_generator import generate_document
-    # await generate_document(message, "purchase", purchase_id)
+    try:
+        # Convert purchase_id to int
+        purchase_id_int = int(purchase_id)
+    except ValueError:
+        logger.error(f"Invalid purchase_id: {purchase_id}")
+        await message.answer("❌ Invalid purchase ID")
+        return
 
-    await message.answer(f"📄 Generating purchase document #{purchase_id}...")
+    # Verify purchase belongs to user (security check)
+    purchase = session.query(Purchase).filter_by(
+        purchaseID=purchase_id_int,
+        userID=user.userID
+    ).first()
+
+    if not purchase:
+        logger.warning(f"Purchase {purchase_id_int} not found for user {user.userID}")
+        await message.answer("❌ Purchase not found or does not belong to you")
+        return
+
+    # Generate PDF
+    # document_type='purchase' tells it to generate purchase agreement
+    pdf_bytes = generate_document(
+        session=session,
+        user=user,
+        document_type='purchase',
+        document_id=purchase_id_int
+    )
+
+    if not pdf_bytes:
+        logger.error(f"Failed to generate purchase document for purchase {purchase_id_int}")
+        await message.answer("❌ Failed to generate document. Please try again later.")
+        return
+
+    # Create file from bytes and send
+    # Filename format: purchase_{purchase_id}.pdf (as in old Talentir)
+    file = BufferedInputFile(
+        file=pdf_bytes,
+        filename=f"purchase_{purchase_id}.pdf"
+    )
+
+    try:
+        await message.answer_document(
+            document=file,
+            caption=f"📄 Purchase agreement #{purchase_id}"
+        )
+        logger.info(f"Purchase document sent to user {user.userID} for purchase {purchase_id_int}")
+    except Exception as e:
+        logger.error(f"Error sending purchase document: {e}", exc_info=True)
+        await message.answer("❌ Failed to send document. Please try again later.")
 
 
 async def handle_certificate_deep_link(
@@ -511,14 +560,65 @@ async def handle_certificate_deep_link(
     """
     Handle /start certificate_ID deep link.
     Generates certificate for project.
+
+    Flow (as in old Talentir):
+    1. Get project_id from deep link
+    2. Find ANY purchase for this project by user
+    3. Call generate_document() with purchase_id (it accepts purchaseID, not projectID)
+    4. Send PDF to user
     """
     logger.info(f"Certificate deep link: user={user.telegramID}, project={project_id}")
 
-    # TODO: Import and call generate_document when ready
-    # from services.document_generator import generate_document
-    # await generate_document(message, "certificate", project_id)
+    try:
+        # Convert project_id to int
+        project_id_int = int(project_id)
+    except ValueError:
+        logger.error(f"Invalid project_id: {project_id}")
+        await message.answer("❌ Invalid project ID")
+        return
 
-    await message.answer(f"📜 Generating certificate for project #{project_id}...")
+    # Find ANY purchase for this project by user
+    # generate_document() needs purchaseID, but certificate is for whole project
+    purchase = session.query(Purchase).filter_by(
+        userID=user.userID,
+        projectID=project_id_int
+    ).first()
+
+    if not purchase:
+        logger.warning(f"No purchases found for user {user.userID} in project {project_id_int}")
+        await message.answer("❌ No purchases found for this project")
+        return
+
+    # Generate PDF using purchase_id (generate_document needs it to find project/option)
+    # document_type='certificate' tells it to generate certificate, not purchase agreement
+    pdf_bytes = generate_document(
+        session=session,
+        user=user,
+        document_type='certificate',
+        document_id=purchase.purchaseID  # <-- Pass purchase_id, function will find project from it
+    )
+
+    if not pdf_bytes:
+        logger.error(f"Failed to generate certificate for project {project_id_int}")
+        await message.answer("❌ Failed to generate certificate. Please try again later.")
+        return
+
+    # Create file from bytes and send
+    # Filename format: certificate_{project_id}.pdf (as in old Talentir)
+    file = BufferedInputFile(
+        file=pdf_bytes,
+        filename=f"certificate_{project_id}.pdf"
+    )
+
+    try:
+        await message.answer_document(
+            document=file,
+            caption=f"📜 Certificate for project #{project_id}"
+        )
+        logger.info(f"Certificate sent to user {user.userID} for project {project_id_int}")
+    except Exception as e:
+        logger.error(f"Error sending certificate document: {e}", exc_info=True)
+        await message.answer("❌ Failed to send certificate. Please try again later.")
 
 
 async def handle_email_verification(

@@ -312,8 +312,8 @@ def generate_document(
 
             # Purchase data
             'packQty': purchase.packQty,
-            'pricePerShare': float(option.costPerShare),
-            'packPrice': float(purchase.packPrice),
+            'pricePerShare': option.costPerShare,
+            'packPrice': purchase.packPrice,
             'projectName': project.projectName,
             'optionName': option.projectName  # Note: Option model uses projectName field
         }
