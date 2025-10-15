@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart
+from aiogram.types import BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy.orm import Session
@@ -15,6 +16,8 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from models.user import User
 from models.payment import Payment
+from models.purchase import Purchase
+from services.document.pdf_generator import generate_document
 from services.user_domain.auth_service import AuthService
 from services.stats_service import StatsService
 from mlm_system.services.rank_service import RankService

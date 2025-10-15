@@ -7,11 +7,11 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from models.user import User
 from models.purchase import Purchase
 from core.message_manager import MessageManager
-from core.user_decorator import with_user
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,6 @@ portfolio_router = Router(name="portfolio_router")
 # ============================================================================
 
 @portfolio_router.callback_query(F.data == "/case")
-@with_user
 async def portfolio_main(
         callback_query: CallbackQuery,
         user: User,
@@ -55,10 +54,10 @@ async def portfolio_main(
         update=callback_query,
         variables={
             'userPurchasesQty': user_purchases_qty,
-            'userPurchasesTotal': user_purchases_total,
+            'userPurchasesTotal': float(user_purchases_total),
             'userProjectsTotal': user_projects_total
         },
-        delete_original=True
+        edit=True
     )
 
 
@@ -67,7 +66,6 @@ async def portfolio_main(
 # ============================================================================
 
 @portfolio_router.callback_query(F.data == "/case/purchases")
-@with_user
 async def my_purchases(
         callback_query: CallbackQuery,
         user: User,
@@ -106,14 +104,14 @@ async def my_purchases(
             template_key='/case/purchases',
             variables=context,
             update=callback_query,
-            delete_original=True
+            edit=True
         )
     else:
         await message_manager.send_template(
             user=user,
             template_key='/case/purchases/empty',
             update=callback_query,
-            delete_original=True
+            edit=True
         )
 
 
@@ -122,7 +120,6 @@ async def my_purchases(
 # ============================================================================
 
 @portfolio_router.callback_query(F.data == "/case/certs")
-@with_user
 async def my_certificates(
         callback_query: CallbackQuery,
         user: User,
@@ -139,11 +136,11 @@ async def my_certificates(
             user=user,
             template_key='/case/certs/empty',
             update=callback_query,
-            delete_original=True
+            edit=True
         )
         return
 
-    # Aggregate by project
+    # Aggregate by project and keep first purchase ID
     project_aggregates = {}
     for purchase in purchases:
         project_id = purchase.projectID
@@ -151,7 +148,8 @@ async def my_certificates(
             project_aggregates[project_id] = {
                 'projectName': purchase.projectName,
                 'total_qty': 0,
-                'total_price': 0
+                'total_price': 0,
+                'first_purchase_id': purchase.purchaseID  # Keep first purchase ID for certificate
             }
         project_aggregates[project_id]['total_qty'] += purchase.packQty
         project_aggregates[project_id]['total_price'] += purchase.packPrice
@@ -166,7 +164,8 @@ async def my_certificates(
     total_amounts = []
 
     for project_id, data in project_aggregates.items():
-        link = f"https://t.me/{bot_username}?start=certificate_{project_id}"
+        # Use first purchase ID for certificate generation
+        link = f"https://t.me/{bot_username}?start=certificate_{data['first_purchase_id']}"
         cert_links.append(f"<a href='{link}'>PDF</a>")
         project_names.append(data['projectName'])
         total_shares.append(data['total_qty'])
@@ -188,7 +187,7 @@ async def my_certificates(
         template_key='/case/certs',
         variables=context,
         update=callback_query,
-        delete_original=True
+        edit=True
     )
 
 
@@ -197,7 +196,6 @@ async def my_certificates(
 # ============================================================================
 
 @portfolio_router.callback_query(F.data == "/case/strategies")
-@with_user
 async def show_strategies(
         callback_query: CallbackQuery,
         user: User,
@@ -214,12 +212,11 @@ async def show_strategies(
         user=user,
         template_key=['/case/strategies', f'/case/strategies/{current_strategy}'],
         update=callback_query,
-        delete_original=True
+        edit=True
     )
 
 
 @portfolio_router.callback_query(F.data.startswith("strategy_"))
-@with_user
 async def select_strategy(
         callback_query: CallbackQuery,
         user: User,
@@ -234,9 +231,8 @@ async def select_strategy(
     # Get current strategy
     current_strategy = user.settings.get('strategy', 'manual') if user.settings else 'manual'
 
-    # Check if already selected
+    # Check if already selected - just ignore click
     if current_strategy == strategy_key:
-        await callback_query.answer("Эта стратегия уже выбрана")
         return
 
     # Update strategy in settings JSON
@@ -246,7 +242,6 @@ async def select_strategy(
     user.settings['strategy'] = strategy_key
 
     # Flag JSON field as modified
-    from sqlalchemy.orm.attributes import flag_modified
     flag_modified(user, 'settings')
 
     session.commit()
@@ -268,7 +263,6 @@ async def select_strategy(
 # ============================================================================
 
 @portfolio_router.callback_query(F.data == "/case/value")
-@with_user
 async def portfolio_value(
         callback_query: CallbackQuery,
         user: User,
@@ -297,7 +291,7 @@ async def portfolio_value(
     ).scalar() or 0
 
     # Calculate projected value
-    projected_value = user_purchases_total * coefficient
+    projected_value = float(user_purchases_total) * coefficient
 
     # Calculate total shares
     user_shares_total = session.query(func.sum(Purchase.packQty)).filter(
@@ -321,11 +315,11 @@ async def portfolio_value(
         user=user,
         template_key=template_keys,
         variables={
-            'current_value': user_purchases_total,
+            'current_value': float(user_purchases_total),
             'projected_value': projected_value,
             'growth_percent': growth_percent,
             'total_shares': user_shares_total
         },
         update=callback_query,
-        delete_original=True
+        edit=True
     )
