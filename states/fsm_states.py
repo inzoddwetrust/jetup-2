@@ -30,6 +30,7 @@ class UserDataDialog(StatesGroup):
     waiting_for_phone = State()
     waiting_for_email = State()
     waiting_for_confirmation = State()
+    waiting_for_old_email = State()
 
 
 class TransferDialog(StatesGroup):

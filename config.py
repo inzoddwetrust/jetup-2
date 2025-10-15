@@ -50,6 +50,8 @@ class Config:
     MAILGUN_API_KEY = "MAILGUN_API_KEY"
     MAILGUN_DOMAIN = "MAILGUN_DOMAIN"
     MAILGUN_FROM_EMAIL = "MAILGUN_FROM_EMAIL"
+    MAILGUN_REGION = "MAILGUN_REGION"
+    SECURE_EMAIL_DOMAINS = "SECURE_EMAIL_DOMAINS"
 
     # Email - SMTP
     SMTP_HOST = "SMTP_HOST"
@@ -66,6 +68,7 @@ class Config:
 
     # MLM System
     DEFAULT_REFERRER_ID = "DEFAULT_REFERRER_ID"
+    STRATEGY_COEFFICIENTS = "STRATEGY_COEFFICIENTS"
 
     # System
     SYSTEM_READY = "SYSTEM_READY"
@@ -73,6 +76,11 @@ class Config:
 
     # Channels (для проверки подписки)
     REQUIRED_CHANNELS = "REQUIRED_CHANNELS"
+
+    # Help & Settings
+    FAQ_URL = "FAQ_URL"
+    SOCIAL_LINKS = "SOCIAL_LINKS"
+    ADMIN_LINKS = "ADMIN_LINKS"
 
     # ═══════════════════════════════════════════════════════════════════════
     # CRITICAL KEYS (must be present)
@@ -108,7 +116,7 @@ class Config:
         logger.info("Loading configuration from environment...")
 
         try:
-            import json  # ← Добавь в начало метода
+            import json
 
             # Telegram
             cls._config[cls.API_TOKEN] = os.getenv("API_TOKEN")
@@ -137,6 +145,7 @@ class Config:
             # Email - Mailgun
             cls._config[cls.MAILGUN_API_KEY] = os.getenv("MAILGUN_API_KEY")
             cls._config[cls.MAILGUN_DOMAIN] = os.getenv("MAILGUN_DOMAIN")
+            cls._config[cls.MAILGUN_REGION] = os.getenv("MAILGUN_REGION", "eu")
             cls._config[cls.MAILGUN_FROM_EMAIL] = os.getenv(
                 "MAILGUN_FROM_EMAIL",
                 "noreply@talentir.info"
@@ -163,13 +172,18 @@ class Config:
                 os.getenv("DEFAULT_REFERRER_ID", "526738615")
             )
 
-            # Channels (JSON format!)
+            # Channels (JSON format)
             channels_str = os.getenv("REQUIRED_CHANNELS", "[]")
             try:
                 cls._config[cls.REQUIRED_CHANNELS] = json.loads(channels_str)
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse REQUIRED_CHANNELS JSON: {e}")
                 cls._config[cls.REQUIRED_CHANNELS] = []
+
+            # Help & Settings - defaults (will be overridden by Google Sheets)
+            cls._config[cls.FAQ_URL] = ""
+            cls._config[cls.SOCIAL_LINKS] = {}
+            cls._config[cls.ADMIN_LINKS] = []
 
             # System
             cls._config[cls.SYSTEM_READY] = False
@@ -263,13 +277,34 @@ class Config:
                 cls.set(cls.DEFAULT_REFERRER_ID, config_dict['DEFAULT_REFERRER_ID'], source="sheets")
                 updates.append(f"DEFAULT_REFERRER_ID: {config_dict['DEFAULT_REFERRER_ID']}")
 
+            if 'STRATEGY_COEFFICIENTS' in config_dict:
+                cls.set(cls.STRATEGY_COEFFICIENTS, config_dict['STRATEGY_COEFFICIENTS'], source="sheets")
+                updates.append(f"STRATEGY_COEFFICIENTS: loaded")
+
+            if 'FAQ_URL' in config_dict:
+                cls.set(cls.FAQ_URL, config_dict['FAQ_URL'], source="sheets")
+                updates.append(f"FAQ_URL: {config_dict['FAQ_URL']}")
+
+            if 'SOCIAL_LINKS' in config_dict:
+                cls.set(cls.SOCIAL_LINKS, config_dict['SOCIAL_LINKS'], source="sheets")
+                updates.append(f"SOCIAL_LINKS: {len(config_dict['SOCIAL_LINKS'])} links")
+
+            if 'ADMIN_LINKS' in config_dict:
+                cls.set(cls.ADMIN_LINKS, config_dict['ADMIN_LINKS'], source="sheets")
+                updates.append(f"ADMIN_LINKS: {len(config_dict['ADMIN_LINKS'])} admins")
+
             if 'WALLETS' in config_dict:
                 cls.set('WALLETS', config_dict['WALLETS'], source="sheets")
                 updates.append(f"WALLETS: {len(config_dict['WALLETS'])} configured")
 
-            # Store all other keys for potential use
+            if 'SECURE_EMAIL_DOMAINS' in config_dict:
+                cls.set('SECURE_EMAIL_DOMAINS', config_dict['SECURE_EMAIL_DOMAINS'], source="sheets")
+                updates.append(f"SECURE_EMAIL_DOMAINS: {config_dict['SECURE_EMAIL_DOMAINS']}")
+
             for key, value in config_dict.items():
-                if key not in ['REQUIRED_CHANNELS', 'DEFAULT_REFERRER_ID', 'WALLETS']:
+                if key not in ['REQUIRED_CHANNELS', 'DEFAULT_REFERRER_ID', 'FAQ_URL',
+                               'SOCIAL_LINKS', 'ADMIN_LINKS', 'WALLETS', 'SECURE_EMAIL_DOMAINS',
+                               'STRATEGY_COEFFICIENTS']:
                     cls.set(key, value, source="sheets")
 
             if updates:

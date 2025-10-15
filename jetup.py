@@ -74,6 +74,16 @@ async def initialize_bot():
         logger.info("📥 Loading dynamic configuration from Google Sheets...")
         await Config.initialize_dynamic_from_sheets()
 
+        # ========================================================================
+        # STEP 3.5: Initialize EmailService
+        # ========================================================================
+        logger.info("Initializing email service...")
+        from email_system import EmailService
+        email_service = EmailService()
+        await email_service.initialize()
+        register_service(EmailService, email_service)
+        logger.info("✓ EmailService initialized and registered")
+
         # ═══════════════════════════════════════════════════════════════════════
         # STEP 4: Initialize bot and dispatcher
         # ═══════════════════════════════════════════════════════════════════════

@@ -11,6 +11,7 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from models.user import User
 from models.payment import Payment
@@ -105,6 +106,12 @@ async def cmd_start(
         if start_payload.startswith("emailverif_"):
             token = start_payload.split("_")[1]
             await handle_email_verification(message, user, session, message_manager, token)
+            return
+
+        # Handle old email verification (DARWIN migration)
+        if start_payload and start_payload.startswith('oldemailverif_'):
+            token = start_payload.replace('oldemailverif_', '')
+            await handle_old_email_verification(message, user, session, message_manager, token)
             return
 
     # ========================================================================
@@ -540,14 +547,19 @@ async def handle_email_verification(
 
     if stored_token and stored_token == token:
         # Token valid - mark as confirmed
-        logger.info(f"Email verified successfully for user {user.telegramID}")
-
         if not user.emailVerification:
             user.emailVerification = {}
 
         user.emailVerification['confirmed'] = True
         user.emailVerification['confirmedAt'] = datetime.now(timezone.utc).isoformat()
+
+        # CRITICAL: Flag JSON field as modified for SQLAlchemy to track changes
+        flag_modified(user, 'emailVerification')
+
         session.commit()
+        session.refresh(user)
+
+        logger.info(f"Email verified successfully for user {user.telegramID}")
 
         await message_manager.send_template(
             user=user,
@@ -561,6 +573,66 @@ async def handle_email_verification(
         await message_manager.send_template(
             user=user,
             template_key='/dashboard/emailverif_invalid',
+            update=message
+        )
+
+
+async def handle_old_email_verification(
+        message: Message,
+        user: User,
+        session: Session,
+        message_manager: MessageManager,
+        token: str
+):
+    """
+    Handle /start oldemailverif_TOKEN deep link.
+    Verifies old email address for DARWIN migrated users.
+    """
+    logger.info(f"Old email verification deep link: user={user.telegramID}, token={token}")
+
+    # Check if old email already verified
+    if user.emailVerification and user.emailVerification.get('old_email_confirmed'):
+        logger.info(f"Old email already verified for user {user.telegramID}")
+        old_email = user.emailVerification.get('old_email', 'Unknown')
+        await message_manager.send_template(
+            user=user,
+            template_key='/dashboard/oldemailverif_already',
+            update=message,
+            variables={'email': old_email}
+        )
+        return
+
+    # Check token
+    stored_token = user.emailVerification.get('old_email_token') if user.emailVerification else None
+
+    if stored_token and stored_token == token:
+        # Token valid - mark as confirmed
+        if not user.emailVerification:
+            user.emailVerification = {}
+
+        user.emailVerification['old_email_confirmed'] = True
+        user.emailVerification['old_email_confirmedAt'] = datetime.now(timezone.utc).isoformat()
+
+        flag_modified(user, 'emailVerification')
+
+        session.commit()
+        session.refresh(user)
+
+        logger.info(f"Old email verified successfully for user {user.telegramID}")
+
+        old_email = user.emailVerification.get('old_email', 'Unknown')
+        await message_manager.send_template(
+            user=user,
+            template_key='/dashboard/oldemailverif',
+            update=message,
+            variables={'email': old_email}
+        )
+    else:
+        # Token invalid
+        logger.warning(f"Invalid old email verification token for user {user.telegramID}")
+        await message_manager.send_template(
+            user=user,
+            template_key='/dashboard/oldemailverif_invalid',
             update=message
         )
 
