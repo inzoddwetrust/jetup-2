@@ -1,3 +1,8 @@
+# jetup/background/notification_processor.py
+"""
+Notification processor service.
+Processes pending notifications and sends them to users.
+"""
 import asyncio
 import json
 import logging
@@ -7,25 +12,33 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from models import Notification, NotificationDelivery, User
-from init import Session
+from core.db import get_db_session_ctx
+from core.utils import SafeDict
+from config import Config
 from aiogram import Bot, types
-from config import API_TOKEN
 
 logger = logging.getLogger(__name__)
 
 
-class SafeDict(dict):
-    def __missing__(self, key):
-        return '{' + key + '}'
-
-
 class NotificationProcessor:
+    """
+    Service for processing and delivering notifications.
+
+    Features:
+    - Automatic delivery creation for new notifications
+    - Retry logic for failed deliveries (up to 3 attempts)
+    - Support for user/all/filter targeting
+    - Keyboard button formatting with variables
+    - Auto-deletion after delay
+    - Silent notifications
+    """
+
     def __init__(self, polling_interval: int = 10):
         """
-        Сервис обработки и доставки уведомлений
+        Initialize notification processor.
 
         Args:
-            polling_interval: интервал проверки в секундах (по умолчанию 30)
+            polling_interval: Interval in seconds to check for new notifications (default: 10)
         """
         self.polling_interval = polling_interval
         self._running = False
@@ -34,8 +47,16 @@ class NotificationProcessor:
     @staticmethod
     def _sequence_format(template: str, variables: dict, sequence_index: int = 0) -> str:
         """
-        Formats string with variables, supporting both scalar and sequence values.
+        Format string with variables, supporting both scalar and sequence values.
         For sequence values, uses value at sequence_index or last value if index out of range.
+
+        Args:
+            template: Template string with {variable} placeholders
+            variables: Dictionary of variable values (can be lists/tuples)
+            sequence_index: Index for sequence values
+
+        Returns:
+            Formatted string
         """
         formatted_vars = {}
 
@@ -53,51 +74,49 @@ class NotificationProcessor:
     @staticmethod
     def _create_keyboard(buttons_str: str, variables: dict = None) -> Optional[types.InlineKeyboardMarkup]:
         """
-        Creates keyboard object from configuration string with variable support.
-        Supports both the legacy format with '],[' and the new format with newlines.
+        Create keyboard from configuration string with variable support.
 
-        Format with '],[' (legacy):
-        [button1:Text1; button2:Text2],[button3:Text3]
+        Supported formats:
+        - Legacy: [button1:Text1; button2:Text2],[button3:Text3]
+        - New with ||: button1:Text1; button2:Text2 || button3:Text3
+        - New with newlines: button1:Text1; button2:Text2\nbutton3:Text3
 
-        Format with '||' (new recommended format):
-        button1:Text1; button2:Text2
-        ||
-        button3:Text3
+        Button format:
+        - Regular callback: callback_data:Button Text
+        - URL button: |url|example.com:Button Text
 
-        Format with newlines (alternative):
-        button1:Text1; button2:Text2
-        button3:Text3
+        Args:
+            buttons_str: String with button configuration
+            variables: Variables for formatting button text/callbacks
+
+        Returns:
+            InlineKeyboardMarkup or None
         """
         if not buttons_str or not buttons_str.strip():
             return None
 
         try:
-            keyboard = types.InlineKeyboardMarkup()
+            keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])
 
             # Remove outer brackets if present
             cleaned_buttons = buttons_str.strip('[]')
 
-            # Determine format and split rows accordingly
+            # Determine format and split rows
             if '||' in cleaned_buttons:
-                # New format with explicit '||' delimiters
                 rows = cleaned_buttons.split('||')
             elif '\n' in cleaned_buttons:
-                # New format with newlines
                 rows = cleaned_buttons.split('\n')
             else:
-                # Legacy format with ],[ delimiters
+                # Legacy format
                 rows = cleaned_buttons.split('],[')
 
             sequence_index = 0
 
             for row in rows:
-                # Skip empty rows
                 if not row.strip():
                     continue
 
-                # Clean row from any remaining brackets
                 row = row.strip().strip('[]')
-
                 button_row = []
                 buttons = row.split(';')
 
@@ -109,7 +128,7 @@ class NotificationProcessor:
                     callback, text = button.split(':', 1)
                     callback, text = callback.strip(), text.strip()
 
-                    # Format both callback and text with variables if provided
+                    # Format with variables
                     if variables:
                         try:
                             if not callback.startswith('|url|'):
@@ -124,25 +143,19 @@ class NotificationProcessor:
                             logger.error(f"Error formatting button: {e}")
                             continue
 
-                    # Create the appropriate button type
+                    # Create button
                     if callback.startswith('|url|'):
                         url = 'https://' + callback[5:]
                         button_row.append(
-                            types.InlineKeyboardButton(
-                                text=text,
-                                url=url
-                            )
+                            types.InlineKeyboardButton(text=text, url=url)
                         )
                     else:
                         button_row.append(
-                            types.InlineKeyboardButton(
-                                text=text,
-                                callback_data=callback
-                            )
+                            types.InlineKeyboardButton(text=text, callback_data=callback)
                         )
 
                 if button_row:
-                    keyboard.row(*button_row)
+                    keyboard.inline_keyboard.append(button_row)
 
             return keyboard if keyboard.inline_keyboard else None
 
@@ -153,89 +166,121 @@ class NotificationProcessor:
     @asynccontextmanager
     async def get_bot(self):
         """
-        Контекстный менеджер для безопасной работы с ботом
+        Context manager for safe bot usage.
+        Creates bot instance if needed, reuses existing one.
         """
         if self._bot is None:
-            self._bot = Bot(token=API_TOKEN)
+            api_token = Config.get(Config.API_TOKEN)
+            self._bot = Bot(token=api_token)
         try:
             yield self._bot
         finally:
-            # Бот закрывается только при выходе из контекстного менеджера
-            # и если это последний активный контекст
-            if not self._running:
+            # Close only when service is stopping
+            if not self._running and self._bot:
                 await self._bot.session.close()
                 self._bot = None
 
     async def process_filter(self, filter_json: str) -> list[int]:
-        """Обрабатывает JSON с условиями фильтрации"""
+        """
+        Process JSON filter conditions to get list of user IDs.
+
+        Args:
+            filter_json: JSON string with filter conditions
+
+        Returns:
+            List of user IDs matching filter
+        """
+        # TODO: Implement query building from filter conditions
         conditions = json.loads(filter_json)
-        with Session() as session:
+        with get_db_session_ctx() as session:
             query = session.query(User.userID)
-            # TODO: Реализовать построение запросов на основе условий
+            # Build query based on conditions
             return []
 
     async def create_deliveries(self, notification: Notification) -> None:
-        """Создает записи о доставке для уведомления"""
-        with Session() as session:
-            try:
-                if notification.targetType == "user":
-                    delivery = NotificationDelivery(
+        """
+        Create delivery records for a notification based on target type.
+
+        Args:
+            notification: Notification object to create deliveries for
+        """
+        with get_db_session_ctx() as session:
+            if notification.targetType == "user":
+                delivery = NotificationDelivery(
+                    notificationID=notification.notificationID,
+                    userID=int(notification.targetValue)
+                )
+                session.add(delivery)
+
+            elif notification.targetType == "all":
+                users = session.query(User.userID).all()
+                deliveries = [
+                    NotificationDelivery(
                         notificationID=notification.notificationID,
-                        userID=int(notification.targetValue)
-                    )
-                    session.add(delivery)
+                        userID=user.userID
+                    ) for user in users
+                ]
+                session.bulk_save_objects(deliveries)
 
-                elif notification.targetType == "all":
-                    users = session.query(User.userID).all()
-                    deliveries = [
-                        NotificationDelivery(
-                            notificationID=notification.notificationID,
-                            userID=user.userID
-                        ) for user in users
-                    ]
-                    session.bulk_save_objects(deliveries)
-
-                elif notification.targetType == "filter":
-                    user_ids = await self.process_filter(notification.targetValue)
-                    deliveries = [
-                        NotificationDelivery(
-                            notificationID=notification.notificationID,
-                            userID=user_id
-                        ) for user_id in user_ids
-                    ]
-                    session.bulk_save_objects(deliveries)
-
-                session.commit()
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Error creating deliveries: {e}")
-                raise
+            elif notification.targetType == "filter":
+                user_ids = await self.process_filter(notification.targetValue)
+                deliveries = [
+                    NotificationDelivery(
+                        notificationID=notification.notificationID,
+                        userID=user_id
+                    ) for user_id in user_ids
+                ]
+                session.bulk_save_objects(deliveries)
 
     async def send_notification(self, delivery: NotificationDelivery) -> bool:
-        """Отправляет одно уведомление"""
+        """
+        Send a single notification to user.
+
+        Args:
+            delivery: NotificationDelivery object
+
+        Returns:
+            True if sent successfully, False otherwise
+        """
         try:
-            with Session() as session:
-                user = session.query(User).filter_by(userID=delivery.userID).first()
-                if not user or not user.telegramID:
-                    raise ValueError(f"User {delivery.userID} not found or has no telegram ID")
+            with get_db_session_ctx() as session:
+                # Get delivery in THIS session (not merge from another session!)
+                delivery = session.query(NotificationDelivery).filter_by(
+                    deliveryID=delivery.deliveryID
+                ).first()
 
-                notification = delivery.notification
-
-                if notification.expiryAt and notification.expiryAt < datetime.now(timezone.utc):
-                    delivery.status = "expired"
-                    session.commit()
+                if not delivery:
+                    logger.error(f"Delivery not found: {delivery.deliveryID}")
                     return False
 
+                # Get user
+                user = session.query(User).filter_by(userID=delivery.userID).first()
+
+                if not user or not user.telegramID:
+                    logger.warning(f"User {delivery.userID} not found or has no telegram ID")
+                    delivery.status = "error"
+                    delivery.errorMessage = "User not found or no telegram ID"
+                    return False
+
+                # Get notification (via relationship)
+                notification = delivery.notification
+
+                # Check expiry
+                if notification.expiryAt and notification.expiryAt < datetime.now(timezone.utc):
+                    delivery.status = "expired"
+                    logger.info(f"Notification {notification.notificationID} expired")
+                    return False
+
+                # Create keyboard if buttons exist
                 keyboard = None
                 if notification.buttons:
-                    # Создаем словарь с переменными для форматирования, если они есть
                     variables = {
                         'user_id': user.userID,
                         'telegram_id': user.telegramID,
-                        # Добавьте другие переменные, которые могут использоваться в шаблонах кнопок
                     }
                     keyboard = NotificationProcessor._create_keyboard(notification.buttons, variables)
 
+                # Send message via bot
                 async with self.get_bot() as bot:
                     message = await bot.send_message(
                         chat_id=user.telegramID,
@@ -246,6 +291,7 @@ class NotificationProcessor:
                         disable_notification=notification.silent
                     )
 
+                    # Schedule auto-deletion if needed
                     if notification.autoDelete:
                         asyncio.create_task(self._schedule_deletion(
                             user.telegramID,
@@ -253,19 +299,41 @@ class NotificationProcessor:
                             notification.autoDelete
                         ))
 
+                # Update delivery status
                 delivery.status = "sent"
                 delivery.sentAt = datetime.now(timezone.utc)
-                user.lastActive = datetime.now(timezone.utc)
-                session.commit()
 
+                # Update user last active
+                user.lastActive = datetime.now(timezone.utc)
+
+                logger.info(f"Notification {notification.notificationID} sent to user {user.userID}")
                 return True
 
         except Exception as e:
-            logger.error(f"Error sending notification {delivery.notificationID}: {e}")
+            logger.error(f"Error sending notification to delivery {delivery.deliveryID}: {e}", exc_info=True)
+
+            # Try to update error status
+            try:
+                with get_db_session_ctx() as session:
+                    delivery = session.query(NotificationDelivery).filter_by(
+                        deliveryID=delivery.deliveryID
+                    ).first()
+                    if delivery:
+                        delivery.errorMessage = str(e)[:500]  # Limit error message length
+            except:
+                pass
+
             return False
 
     async def _schedule_deletion(self, chat_id: int, message_id: int, delay: int):
-        """Отложенное удаление сообщения"""
+        """
+        Schedule message deletion after delay.
+
+        Args:
+            chat_id: Telegram chat ID
+            message_id: Message ID to delete
+            delay: Delay in seconds
+        """
         await asyncio.sleep(delay)
         try:
             async with self.get_bot() as bot:
@@ -274,18 +342,22 @@ class NotificationProcessor:
             logger.error(f"Error deleting message {message_id}: {e}")
 
     async def process_pending_deliveries(self) -> None:
-        """Обрабатывает неотправленные уведомления"""
-        with Session() as session:
+        """
+        Process pending notification deliveries.
+        Sends notifications and updates delivery status.
+        """
+        with get_db_session_ctx() as session:
+            # Get pending deliveries (up to 3 attempts)
             pending_deliveries = (
                 session.query(NotificationDelivery)
-                    .join(Notification)
-                    .filter(and_(
+                .join(Notification)
+                .filter(and_(
                     NotificationDelivery.status == "pending",
                     NotificationDelivery.attempts < 3
                 ))
-                    .order_by(Notification.priority.desc())
-                    .limit(50)
-                    .all()
+                .order_by(Notification.priority.desc())
+                .limit(50)
+                .all()
             )
 
             for delivery in pending_deliveries:
@@ -298,16 +370,17 @@ class NotificationProcessor:
                 elif delivery.attempts >= 3:
                     delivery.status = "error"
 
-                session.commit()
-
     async def process_new_notifications(self) -> None:
-        """Создает записи о доставке для новых уведомлений"""
-        with Session() as session:
+        """
+        Find notifications without deliveries and create them.
+        """
+        with get_db_session_ctx() as session:
+            # Find notifications without any deliveries
             new_notifications = (
                 session.query(Notification)
-                    .outerjoin(NotificationDelivery)
-                    .filter(NotificationDelivery.deliveryID == None)
-                    .all()
+                .outerjoin(NotificationDelivery)
+                .filter(NotificationDelivery.deliveryID == None)
+                .all()
             )
 
             for notification in new_notifications:
@@ -317,9 +390,13 @@ class NotificationProcessor:
                     logger.error(f"Error processing notification {notification.notificationID}: {e}")
 
     async def run(self) -> None:
-        """Основной цикл обработки"""
+        """
+        Main processing loop.
+        Runs continuously checking for new notifications and sending pending ones.
+        """
         logger.info("Starting notification processor")
         self._running = True
+
         try:
             while self._running:
                 try:
@@ -334,9 +411,9 @@ class NotificationProcessor:
             if self._bot:
                 await self._bot.session.close()
                 self._bot = None
+            logger.info("Notification processor stopped")
 
     async def stop(self):
-        """Безопасная остановка процессора"""
+        """Stop the processor gracefully."""
         self._running = False
-        # Дождемся следующей итерации цикла для корректного завершения
         await asyncio.sleep(0)

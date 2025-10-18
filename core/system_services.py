@@ -44,6 +44,20 @@ class ServiceManager:
         """
         logger.info("Starting background services...")
 
+        # Start Notification Processor
+        from background.notification_processor import NotificationProcessor
+        notification_processor = NotificationProcessor(polling_interval=10)
+        task = asyncio.create_task(notification_processor.run(), name="notification_processor")
+        self.services.append(task)
+        logger.info("✓ Notification processor started")
+
+        # Start Transfer Bonus Processor
+        from background.transfer_bonus_processor import TransferBonusProcessor
+        transfer_bonus_processor = TransferBonusProcessor(polling_interval=10)
+        task = asyncio.create_task(transfer_bonus_processor.run(), name="transfer_bonus_processor")
+        self.services.append(task)
+        logger.info("✓ Transfer Bonus Processor started")
+
         # TODO: Import and start services when ready
         # Example:
         # from background.mlm_scheduler import MLMScheduler
