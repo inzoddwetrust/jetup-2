@@ -214,3 +214,137 @@ class ChainWalker:
 
         self.walk_downline(user, counter, max_depth)
         return count[0]
+
+    def validate_default_referrer(self) -> bool:
+        """
+        Validate that DEFAULT_REFERRER exists and has upline=self.
+
+        Returns:
+            True if valid, False otherwise
+        """
+        default_ref_id = self.get_default_referrer_id()
+        if not default_ref_id:
+            logger.error("DEFAULT_REFERRER_ID not configured!")
+            return False
+
+        root_user = self.session.query(User).filter_by(
+            telegramID=default_ref_id
+        ).first()
+
+        if not root_user:
+            logger.error(f"DEFAULT_REFERRER (telegramID={default_ref_id}) not found in DB!")
+            return False
+
+        if root_user.upline != root_user.telegramID:
+            logger.error(
+                f"DEFAULT_REFERRER (userID={root_user.userID}) has "
+                f"upline={root_user.upline}, should be {root_user.telegramID}"
+            )
+            return False
+
+        logger.info(f"✓ DEFAULT_REFERRER validation passed (userID={root_user.userID})")
+        return True
+
+    def validate_chain_to_root(self, user_id: int) -> bool:
+        """
+        Validate that user's upline chain reaches DEFAULT_REFERRER.
+
+        Args:
+            user_id: User ID to validate
+
+        Returns:
+            True if chain is valid, False otherwise
+        """
+        default_ref_id = self.get_default_referrer_id()
+        if not default_ref_id:
+            logger.error("DEFAULT_REFERRER_ID not configured!")
+            return False
+
+        user = self.session.query(User).filter_by(userID=user_id).first()
+        if not user:
+            logger.error(f"User {user_id} not found")
+            return False
+
+        # Walk up the chain
+        visited = set()
+        current_user = user
+        max_depth = 100  # Safety limit
+        depth = 0
+
+        while depth < max_depth:
+            # Check if reached root
+            if current_user.telegramID == default_ref_id:
+                logger.debug(f"User {user_id} chain is valid (depth={depth})")
+                return True
+
+            # Check for self-reference (should only be root)
+            if current_user.upline == current_user.telegramID:
+                if current_user.telegramID == default_ref_id:
+                    return True  # Valid root
+                else:
+                    logger.error(
+                        f"Invalid self-reference: user {current_user.userID} "
+                        f"(telegramID={current_user.telegramID}) has upline=self "
+                        f"but is NOT DEFAULT_REFERRER"
+                    )
+                    return False
+
+            # Check for cycles
+            if current_user.userID in visited:
+                logger.error(f"Cycle detected in chain for user {user_id}")
+                return False
+
+            visited.add(current_user.userID)
+
+            # Get upline
+            if not current_user.upline:
+                logger.error(
+                    f"Broken chain: user {current_user.userID} has no upline "
+                    f"and is not DEFAULT_REFERRER"
+                )
+                return False
+
+            upline_user = self.session.query(User).filter_by(
+                telegramID=current_user.upline
+            ).first()
+
+            if not upline_user:
+                logger.error(
+                    f"Broken chain: upline telegramID={current_user.upline} "
+                    f"not found for user {current_user.userID}"
+                )
+                return False
+
+            current_user = upline_user
+            depth += 1
+
+        logger.error(f"Chain too deep (>{max_depth}) for user {user_id}")
+        return False
+
+    def find_orphan_branches(self) -> Set[int]:
+        """
+        Find all users whose chains don't reach DEFAULT_REFERRER.
+
+        Returns:
+            Set of user IDs in orphan branches
+        """
+        default_ref_id = self.get_default_referrer_id()
+        if not default_ref_id:
+            logger.error("DEFAULT_REFERRER_ID not configured!")
+            return set()
+
+        orphans = set()
+        all_users = self.session.query(User).filter(
+            User.telegramID != default_ref_id
+        ).all()
+
+        for user in all_users:
+            if not self.validate_chain_to_root(user.userID):
+                orphans.add(user.userID)
+
+        if orphans:
+            logger.warning(f"Found {len(orphans)} users in orphan branches: {orphans}")
+        else:
+            logger.info("No orphan branches found")
+
+        return orphans

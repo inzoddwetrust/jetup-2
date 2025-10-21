@@ -1,14 +1,23 @@
-# bot/mlm_system/services/commission_service.py
+# mlm_system/services/commission_service.py
 """
-Commission calculation service - replaces old bonus_processor.
+Commission calculation service - handles MLM differential commissions.
 """
 from decimal import Decimal
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 import logging
 
-from models import User, Purchase, Bonus
-from mlm_system.config.ranks import RANK_CONFIG, Rank, PIONEER_BONUS_PERCENTAGE, REFERRAL_BONUS_PERCENTAGE, REFERRAL_BONUS_MIN_AMOUNT
+from models.user import User
+from models.purchase import Purchase
+from models.bonus import Bonus
+from models.passive_balance import PassiveBalance
+from mlm_system.config.ranks import (
+    RANK_CONFIG,
+    Rank,
+    PIONEER_BONUS_PERCENTAGE,
+    REFERRAL_BONUS_PERCENTAGE,
+    REFERRAL_BONUS_MIN_AMOUNT
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,28 +48,22 @@ class CommissionService:
             "totalDistributed": Decimal("0")
         }
 
-        # 1. Calculate differential commissions
-        differentialCommissions = await self._calculateDifferentialCommissions(purchase)
+        # 1. Calculate differential commissions (includes compression to root)
+        commissions = await self._calculateDifferentialCommissions(purchase)
 
-        # 2. Apply compression if needed
-        compressedCommissions = await self._applyCompression(
-            differentialCommissions,
-            purchase
-        )
-
-        # 3. Apply Pioneer Bonus if applicable
+        # 2. Apply Pioneer Bonus if applicable
         pioneeredCommissions = await self._applyPioneerBonus(
-            compressedCommissions,
+            commissions,
             purchase
         )
 
-        # 4. Save all commissions to database
+        # 3. Save all commissions to database
         for commission in pioneeredCommissions:
             await self._saveCommission(commission, purchase)
             results["totalDistributed"] += commission["amount"]
             results["commissions"].append(commission)
 
-        # 5. Process referral bonus if applicable
+        # 4. Process referral bonus if applicable
         referralBonus = await self.processReferralBonus(purchase)
         if referralBonus:
             results["commissions"].append(referralBonus)
@@ -81,41 +84,53 @@ class CommissionService:
         """
         Calculate differential commissions up the chain.
         Uses ChainWalker for safe upline traversal.
+        Accumulates compression and sends remainder to ROOT.
         """
         from mlm_system.utils.chain_walker import ChainWalker
 
         commissions = []
         lastPercentage = Decimal("0")
+        accumulated_compression = Decimal("0")
 
         walker = ChainWalker(self.session)
 
         def process_upline(upline_user: User, level: int) -> bool:
             """Process each upline user for commission calculation."""
-            nonlocal lastPercentage
+            nonlocal lastPercentage, accumulated_compression
+
+            # Get user percentage
+            userPercentage = self._getUserRankPercentage(upline_user)
+            differential = userPercentage - lastPercentage
 
             # Check if upline is active
             if not upline_user.isActive:
-                # Mark for compression - will be handled in next step
+                # Accumulate for compression
+                if differential > 0:
+                    accumulated_compression += differential
+
                 commissions.append({
                     "userId": upline_user.userID,
-                    "percentage": self._getUserRankPercentage(upline_user),
+                    "percentage": differential,
                     "amount": Decimal("0"),
                     "level": level,
                     "rank": upline_user.rank,
                     "isActive": False,
                     "compressed": True
                 })
-            else:
-                # Calculate differential
-                userPercentage = self._getUserRankPercentage(upline_user)
-                differential = userPercentage - lastPercentage
 
-                if differential > 0:
-                    amount = Decimal(str(purchase.packPrice)) * differential
+                logger.debug(
+                    f"Compressing inactive user {upline_user.userID}, "
+                    f"accumulating {float(differential * 100):.1f}%"
+                )
+            else:
+                # Active user - gets their differential + accumulated compression
+                if differential > 0 or accumulated_compression > 0:
+                    total_percentage = differential + accumulated_compression
+                    amount = Decimal(str(purchase.packPrice)) * total_percentage
 
                     commissions.append({
                         "userId": upline_user.userID,
-                        "percentage": differential,
+                        "percentage": total_percentage,
                         "amount": amount,
                         "level": level,
                         "rank": upline_user.rank,
@@ -123,7 +138,15 @@ class CommissionService:
                         "compressed": False
                     })
 
+                    if accumulated_compression > 0:
+                        logger.info(
+                            f"User {upline_user.userID} receives compression: "
+                            f"+{float(accumulated_compression * 100):.1f}% "
+                            f"(total {float(total_percentage * 100):.1f}%)"
+                        )
+
                     lastPercentage = userPercentage
+                    accumulated_compression = Decimal("0")  # Reset after distribution
 
             # Stop at max percentage
             if lastPercentage >= Decimal("0.18"):
@@ -134,44 +157,42 @@ class CommissionService:
         # Walk up the chain safely
         walker.walk_upline(purchase.user, process_upline)
 
+        # ═══════════════════════════════════════════════════════════════════
+        # CRITICAL: Send remaining commission to ROOT (system wallet)
+        # ═══════════════════════════════════════════════════════════════════
+        if accumulated_compression > 0 or lastPercentage < Decimal("0.18"):
+            default_ref_id = walker.get_default_referrer_id()
+            root_user = self.session.query(User).filter_by(
+                telegramID=default_ref_id
+            ).first()
+
+            if root_user:
+                # Calculate remaining percentage up to 18%
+                remaining_percentage = Decimal("0.18") - lastPercentage
+                total_to_root = accumulated_compression + remaining_percentage
+
+                if total_to_root > 0:
+                    amount = Decimal(str(purchase.packPrice)) * total_to_root
+
+                    commissions.append({
+                        "userId": root_user.userID,
+                        "percentage": total_to_root,
+                        "amount": amount,
+                        "level": len(commissions) + 1,
+                        "rank": root_user.rank,
+                        "isActive": True,  # Root is ALWAYS treated as active
+                        "compressed": False,
+                        "isSystemRoot": True  # Mark as system commission
+                    })
+
+                    logger.info(
+                        f"System commission to root user {root_user.userID}: "
+                        f"${amount} ({float(total_to_root * 100):.1f}% - "
+                        f"compression: {float(accumulated_compression * 100):.1f}%, "
+                        f"remaining: {float(remaining_percentage * 100):.1f}%)"
+                    )
+
         return commissions
-
-    async def _applyCompression(
-            self,
-            commissions: List[Dict],
-            purchase: Purchase
-    ) -> List[Dict]:
-        """Apply compression - skip inactive users."""
-        compressedCommissions = []
-        pendingCompression = Decimal("0")
-
-        for commission in commissions:
-            if not commission["isActive"]:
-                # Accumulate percentage for compression
-                pendingCompression += commission["percentage"]
-                logger.info(
-                    f"Compressing inactive user {commission['userId']}, "
-                    f"accumulating {commission['percentage']}%"
-                )
-            else:
-                # Active user - gets their percentage + compressed
-                totalPercentage = commission["percentage"] + pendingCompression
-                commission["amount"] = Decimal(str(purchase.packPrice)) * totalPercentage
-                commission["compressed"] = pendingCompression > 0
-                commission["compressionAmount"] = pendingCompression
-
-                compressedCommissions.append(commission)
-                pendingCompression = Decimal("0")
-
-        return compressedCommissions
-
-    def _getUserRankPercentage(self, user: User) -> Decimal:
-        """Get commission percentage for user's rank."""
-        try:
-            rank = Rank(user.rank)
-            return RANK_CONFIG[rank]["percentage"]
-        except (ValueError, KeyError):
-            return RANK_CONFIG[Rank.START]["percentage"]
 
     async def _applyPioneerBonus(
             self,
@@ -179,43 +200,104 @@ class CommissionService:
             purchase: Purchase
     ) -> List[Dict]:
         """Apply Pioneer Bonus (+4%) for qualified users."""
-        pioneeredCommissions = []
+        result = []
 
         for commission in commissions:
+            result.append(commission)
+
+            # Skip if inactive or system root
+            if not commission["isActive"] or commission.get("isSystemRoot"):
+                continue
+
             user = self.session.query(User).filter_by(
-                userID=commission["userId"]
+                userId=commission["userID"]
             ).first()
 
-            if user and user.mlmStatus:
-                hasPioneerBonus = user.mlmStatus.get("hasPioneerBonus", False)
+            if not user:
+                continue
 
-                if hasPioneerBonus:
-                    # Add 4% bonus
-                    pioneerAmount = Decimal(str(purchase.packPrice)) * PIONEER_BONUS_PERCENTAGE
-                    commission["pioneerBonus"] = pioneerAmount
-                    commission["amount"] += pioneerAmount
+            # Check if user is qualified for Pioneer Bonus
+            if user.mlmStatus and user.mlmStatus.get("pioneerBonusQualified", False):
+                pioneer_amount = Decimal(str(purchase.packPrice)) * PIONEER_BONUS_PERCENTAGE
 
-                    logger.info(
-                        f"Pioneer bonus {pioneerAmount} added for user {user.userID}"
-                    )
+                result.append({
+                    "userID": user.userID,
+                    "percentage": PIONEER_BONUS_PERCENTAGE,
+                    "amount": pioneer_amount,
+                    "level": commission["level"],
+                    "rank": user.rank,
+                    "isActive": True,
+                    "compressed": False,
+                    "isPioneerBonus": True
+                })
 
-            pioneeredCommissions.append(commission)
+                logger.info(f"Pioneer bonus: ${pioneer_amount} for user {user.userID}")
 
-        return pioneeredCommissions
+        return result
 
-    async def _saveCommission(self, commissionData: Dict, purchase: Purchase):
-        """Save commission to database."""
-        # Get user for owner fields
-        user = self.session.query(User).filter_by(userID=commissionData["userId"]).first()
-        if not user:
-            logger.error(f"User {commissionData['userId']} not found for commission")
-            return
+    async def processReferralBonus(self, purchase: Purchase) -> Optional[Dict]:
+        """Process Referral Bonus (1% for ≥5000$ purchases)."""
+        if purchase.packPrice < REFERRAL_BONUS_MIN_AMOUNT:
+            return None
 
-        # Create bonus record - using actual field names from Bonus model
+        user = purchase.user
+        if not user.upline:
+            return None
+
+        upline_user = self.session.query(User).filter_by(
+            telegramID=user.upline
+        ).first()
+
+        if not upline_user or not upline_user.isActive:
+            return None
+
+        bonus_amount = Decimal(str(purchase.packPrice)) * REFERRAL_BONUS_PERCENTAGE
+
         bonus = Bonus()
+        bonus.userID = upline_user.userID
+        bonus.downlineID = user.userID
+        bonus.purchaseID = purchase.purchaseID
+        bonus.projectID = purchase.projectID
+        bonus.optionID = purchase.optionID
+        bonus.packQty = purchase.packQty
+        bonus.packPrice = purchase.packPrice
+        bonus.commissionType = "referral"
+        bonus.uplineLevel = 1
+        bonus.fromRank = user.rank
+        bonus.sourceRank = upline_user.rank
+        bonus.bonusRate = float(REFERRAL_BONUS_PERCENTAGE)
+        bonus.bonusAmount = bonus_amount
+        bonus.status = "paid"
+        bonus.notes = f"Referral bonus for ${purchase.packPrice} purchase"
+        bonus.ownerTelegramID = upline_user.telegramID
+        bonus.ownerEmail = upline_user.email
 
-        # Required fields
-        bonus.userID = commissionData["userId"]
+        self.session.add(bonus)
+        self.session.flush()
+
+        await self._updatePassiveBalance(upline_user.userID, bonus_amount, bonus.bonusID)
+
+        logger.info(f"Referral bonus: ${bonus_amount} for user {upline_user.userID}")
+
+        return {
+            "userId": upline_user.userID,
+            "percentage": REFERRAL_BONUS_PERCENTAGE,
+            "amount": bonus_amount,
+            "level": 1,
+            "rank": upline_user.rank,
+            "isActive": True,
+            "compressed": False,
+            "isReferralBonus": True
+        }
+
+    async def _saveCommission(
+            self,
+            commission: Dict,
+            purchase: Purchase
+    ):
+        """Save commission to database as Bonus and update PassiveBalance."""
+        bonus = Bonus()
+        bonus.userID = commission["userId"]
         bonus.downlineID = purchase.userID
         bonus.purchaseID = purchase.purchaseID
 
@@ -225,108 +307,88 @@ class CommissionService:
         bonus.packQty = purchase.packQty
         bonus.packPrice = purchase.packPrice
 
-        # MLM specific fields
-        bonus.commissionType = "differential"
-        bonus.uplineLevel = commissionData["level"]
-        bonus.fromRank = commissionData["rank"]
-        bonus.sourceRank = None  # Will be set for global pool
-        bonus.bonusRate = float(commissionData["percentage"])
-        bonus.bonusAmount = commissionData["amount"]
-        bonus.compressionApplied = 1 if commissionData.get("compressed", False) else 0
+        # MLM specific
+        bonus.uplineLevel = commission["level"]
+        bonus.fromRank = purchase.user.rank
+        bonus.sourceRank = commission["rank"]
+        bonus.bonusRate = float(commission["percentage"])
+        bonus.bonusAmount = commission["amount"]
+        bonus.compressionApplied = 1 if commission.get("compressed") else 0
 
-        # Status
+        # Determine commission type
+        if commission.get("isSystemRoot"):
+            bonus.commissionType = "system_compression"
+            bonus.notes = "System commission (compression + remaining to 18%)"
+        elif commission.get("isPioneerBonus"):
+            bonus.commissionType = "pioneer"
+            bonus.notes = "Pioneer bonus (+4%)"
+        else:
+            bonus.commissionType = "differential"
+            bonus.notes = "Differential commission"
+
         bonus.status = "paid"
-        bonus.notes = f"Level {commissionData['level']} commission"
 
-        # AuditMixin fields - these are set automatically or manually
-        bonus.ownerTelegramID = user.telegramID
-        bonus.ownerEmail = user.email
-        # createdAt and updatedAt are handled by AuditMixin defaults
+        # AuditMixin
+        user = self.session.query(User).filter_by(userID=commission["userId"]).first()
+        if user:
+            bonus.ownerTelegramID = user.telegramID
+            bonus.ownerEmail = user.email
 
         self.session.add(bonus)
-        self.session.flush()  # Get bonus.bonusID
+        self.session.flush()
 
-        # Update user's passive balance
-        user.balancePassive = (user.balancePassive or Decimal("0")) + commissionData["amount"]
+        # Update PassiveBalance
+        if not commission.get("isSystemRoot"):
+            # Regular user commission → PassiveBalance
+            await self._updatePassiveBalance(
+                commission["userId"],
+                commission["amount"],
+                bonus.bonusID
+            )
+        else:
+            # System commission → recorded but not added to user balance
+            logger.info(
+                f"System commission ${commission['amount']} recorded "
+                f"for root user {commission['userId']} (bonusID={bonus.bonusID})"
+            )
 
-        # Create PassiveBalance transaction record
+    async def _updatePassiveBalance(
+            self,
+            userId: int,
+            amount: Decimal,
+            bonusId: int
+    ):
+        """Update user's passive balance."""
         from models.passive_balance import PassiveBalance
 
-        passive_record = PassiveBalance()
-        passive_record.userID = commissionData["userId"]
-        passive_record.firstname = user.firstname
-        passive_record.surname = user.surname
-        passive_record.amount = commissionData["amount"]
-        passive_record.status = 'done'
-        passive_record.reason = f'bonus={bonus.bonusID}'
-        passive_record.link = ''
-        passive_record.notes = f'{commissionData.get("commissionType", "differential")} level {commissionData["level"]}'
+        user = self.session.query(User).filter_by(userID=userId).first()
+        if not user:
+            logger.error(f"User {userId} not found for passive balance update")
+            return
 
-        self.session.add(passive_record)
+        # Update user's passive balance total
+        user.balancePassive = (user.balancePassive or Decimal("0")) + amount
 
-        logger.info(
-            f"Updated passive balance for user {user.userID}: "
-            f"+{commissionData['amount']} (bonus {bonus.bonusID})"
-        )
+        # Create PassiveBalance transaction record
+        transaction = PassiveBalance()
+        transaction.userID = userId
+        transaction.firstname = user.firstname
+        transaction.surname = user.surname
+        transaction.amount = amount
+        transaction.status = "done"
+        transaction.reason = f"bonus={bonusId}"
+        transaction.link = ""
+        transaction.notes = "MLM commission"
 
-    async def processReferralBonus(self, purchase: Purchase) -> Optional[Dict]:
-        """
-        Process 1% referral bonus for direct sponsor.
-        Only for purchases >= 5000.
-        """
-        if Decimal(str(purchase.packPrice)) < REFERRAL_BONUS_MIN_AMOUNT:
-            return None
+        self.session.add(transaction)
 
-        # Get direct sponsor
-        purchaseUser = purchase.user
-        if not purchaseUser.upline:
-            return None
+        logger.info(f"Updated passive balance for user {userId}: +{amount} (bonus {bonusId})")
 
-        sponsor = self.session.query(User).filter_by(
-            telegramID=purchaseUser.upline
-        ).first()
-
-        if not sponsor or not sponsor.isActive:
-            return None
-
-        # Calculate 1% bonus
-        bonusAmount = Decimal(str(purchase.packPrice)) * REFERRAL_BONUS_PERCENTAGE
-
-        # Save bonus
-        bonus = Bonus()
-
-        # Set fields properly
-        bonus.userID = sponsor.userID
-        bonus.downlineID = purchase.userID
-        bonus.purchaseID = purchase.purchaseID
-        bonus.projectID = purchase.projectID
-        bonus.optionID = purchase.optionID
-        bonus.packQty = purchase.packQty
-        bonus.packPrice = purchase.packPrice
-
-        bonus.commissionType = "referral"
-        bonus.uplineLevel = 1
-        bonus.fromRank = sponsor.rank
-        bonus.bonusRate = float(REFERRAL_BONUS_PERCENTAGE)
-        bonus.bonusAmount = bonusAmount
-        bonus.compressionApplied = 0
-
-        bonus.status = "paid"
-        bonus.notes = "Referral bonus for direct sponsor"
-
-        # Owner fields
-        bonus.ownerTelegramID = sponsor.telegramID
-        bonus.ownerEmail = sponsor.email
-
-        self.session.add(bonus)
-
-        # Update balance
-        sponsor.balancePassive = (sponsor.balancePassive or Decimal("0")) + bonusAmount
-
-        logger.info(f"Referral bonus {bonusAmount} for sponsor {sponsor.userID}")
-
-        return {
-            "userId": sponsor.userID,
-            "amount": bonusAmount,
-            "type": "referral"
-        }
+    def _getUserRankPercentage(self, user: User) -> Decimal:
+        """Get commission percentage for user's rank."""
+        try:
+            rank_enum = Rank(user.rank.lower())
+            return RANK_CONFIG[rank_enum]["percentage"]
+        except (ValueError, KeyError):
+            logger.warning(f"Invalid rank '{user.rank}' for user {user.userID}, using START")
+            return RANK_CONFIG[Rank.START]["percentage"]
