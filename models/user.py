@@ -226,11 +226,13 @@ class User(Base):
     @emailConfirmed.setter
     def emailConfirmed(self, value):
         """Установка статуса подтверждения email"""
+        from sqlalchemy.orm.attributes import flag_modified
         if not self.emailVerification:
             self.emailVerification = {}
         self.emailVerification['confirmed'] = bool(value)
         if value:
             self.emailVerification['confirmedAt'] = datetime.now(timezone.utc).isoformat()
+        flag_modified(self, 'emailVerification')
 
     # === PROPERTY для настроек стратегии (для старого кода) ===
     @property
@@ -243,9 +245,11 @@ class User(Base):
     @strategy.setter
     def strategy(self, value):
         """Установка стратегии"""
+        from sqlalchemy.orm.attributes import flag_modified
         if not self.settings:
             self.settings = {}
         self.settings['strategy'] = value
+        flag_modified(self, 'settings')
 
     # === PROPERTY для pioneer статуса ===
     @property
@@ -258,9 +262,11 @@ class User(Base):
     @isPioneer.setter
     def isPioneer(self, value):
         """Установка pioneer статуса"""
+        from sqlalchemy.orm.attributes import flag_modified
         if not self.mlmStatus:
             self.mlmStatus = {}
         self.mlmStatus['isFounder'] = bool(value)
+        flag_modified(self, 'mlmStatus')
 
     # === PROPERTY для месячного PV ===
     @property
@@ -273,9 +279,11 @@ class User(Base):
     @monthlyPV.setter
     def monthlyPV(self, value):
         """Установка PV текущего месяца"""
+        from sqlalchemy.orm.attributes import flag_modified
         if not self.mlmVolumes:
             self.mlmVolumes = {}
         self.mlmVolumes['monthlyPV'] = float(value)
+        flag_modified(self, 'mlmVolumes')
 
     # === PROPERTY для личного объема ===
     @property
@@ -288,9 +296,11 @@ class User(Base):
     @personalVolume.setter
     def personalVolume(self, value):
         """Установка накопительного личного объема"""
+        from sqlalchemy.orm.attributes import flag_modified
         if not self.mlmVolumes:
             self.mlmVolumes = {}
         self.mlmVolumes['personalTotal'] = float(value)
+        flag_modified(self, 'mlmVolumes')
 
     # === HELPER методы для удобства ===
     def has_filled_data(self):
@@ -315,18 +325,22 @@ class User(Base):
 
     def set_verification_token(self, token):
         """Установка токена верификации"""
+        from sqlalchemy.orm.attributes import flag_modified
         if not self.emailVerification:
             self.emailVerification = {}
         self.emailVerification['token'] = token
         self.emailVerification['confirmed'] = False
         self.emailVerification['sentAt'] = datetime.now(timezone.utc).isoformat()
+        flag_modified(self, 'emailVerification')
 
     def mark_email_verified(self):
         """Отметка email как подтвержденного"""
+        from sqlalchemy.orm.attributes import flag_modified
         if not self.emailVerification:
             self.emailVerification = {}
         self.emailVerification['confirmed'] = True
         self.emailVerification['confirmedAt'] = datetime.now(timezone.utc).isoformat()
+        flag_modified(self, 'emailVerification')
 
     def get_email_attempts(self):
         """Получение количества попыток отправки email"""

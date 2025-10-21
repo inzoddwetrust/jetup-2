@@ -96,6 +96,9 @@ class RankService:
             user.mlmStatus = {}
         user.mlmStatus["rankQualifiedAt"] = timeMachine.now.isoformat()
 
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(user, 'mlmStatus')
+
         # Create history record
         history = RankHistory(
             userID=userId,
@@ -136,6 +139,9 @@ class RankService:
             user.mlmStatus = {}
         user.mlmStatus["assignedRank"] = newRank
         user.mlmStatus["rankQualifiedAt"] = timeMachine.now.isoformat()
+
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(user, 'mlmStatus')
 
         # Create history record
         history = RankHistory(
@@ -185,6 +191,8 @@ class RankService:
 
         if user.mlmStatus:
             user.mlmStatus["lastActiveMonth"] = timeMachine.currentMonth if isActive else None
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(user, 'mlmStatus')
 
         logger.info(f"User {userId} activity updated: {isActive} (PV: {monthlyPV})")
         return True

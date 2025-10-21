@@ -144,6 +144,9 @@ def set_email_last_sent(user: User, timestamp: datetime) -> None:
     user.emailVerification['sentAt'] = timestamp.isoformat()
     user.emailVerification['attempts'] = user.emailVerification.get('attempts', 0) + 1
 
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(user, 'emailVerification')
+
 
 def get_email_last_sent(user: User) -> Optional[datetime]:
     """Get timestamp of last email sent"""

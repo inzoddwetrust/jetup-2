@@ -50,6 +50,9 @@ class VolumeService:
             Decimal(user.mlmVolumes.get("monthlyPV", "0")) + amount
         )
 
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(user, 'mlmVolumes')
+
         # Check activation status
         monthlyPv = Decimal(user.mlmVolumes["monthlyPV"])
         if monthlyPv >= Decimal("200"):
@@ -58,6 +61,7 @@ class VolumeService:
 
             if user.mlmStatus:
                 user.mlmStatus["lastActiveMonth"] = currentMonth
+                flag_modified(user, 'mlmStatus')
 
         logger.info(
             f"Updated PV for user {user.userID}: "
@@ -85,6 +89,9 @@ class VolumeService:
                 uplineUser.mlmVolumes = {}
 
             uplineUser.mlmVolumes["teamTotal"] = str(uplineUser.teamVolumeTotal)
+
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(uplineUser, 'mlmVolumes')
 
             logger.info(
                 f"Updated TV for user {uplineUser.userID}: "
@@ -159,6 +166,8 @@ class VolumeService:
         for user in allUsers:
             if user.mlmVolumes:
                 user.mlmVolumes["monthlyPV"] = "0"
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(user, 'mlmVolumes')
 
             # Reset monthly activity
             user.isActive = False

@@ -83,6 +83,9 @@ class AuthService:
         user.personalData['eulaVersion'] = eula_version
         user.personalData['eulaAcceptedAt'] = datetime.now(timezone.utc).isoformat()
 
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(user, 'personalData')
+
         self.session.commit()
         logger.info(f"EULA accepted for user {user.userID} (version {eula_version})")
 
