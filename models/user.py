@@ -40,7 +40,37 @@ class User(Base):
     # MLM System - критичные поля для производительности
     rank = Column(String, default="start", index=True)  # start, builder, growth, leadership, director
     isActive = Column(Boolean, default=False, index=True)  # Активен в текущем месяце (PV >= 200)
+    fullVolume = Column(DECIMAL(15, 2), default=Decimal("0"), nullable=False, index=True)
+
+    # NEW: Total Volume with 50% rule (JSON with detailed calculation)
+    totalVolume = Column(JSON, nullable=True)
+    # Structure:
+    # {
+    #     "qualifyingVolume": 35000.00,
+    #     "fullVolume": 60000.00,
+    #     "requiredForNextRank": 50000.00,
+    #     "gap": 15000.00,
+    #     "nextRank": "growth",
+    #     "currentRank": "builder",
+    #     "capLimit": 25000.00,
+    #     "branches": [
+    #         {
+    #             "referralTelegramId": 123456789,
+    #             "referralName": "Иван Петров (1001)",
+    #             "referralUserId": 1001,
+    #             "fullVolume": 50000.00,
+    #             "cappedVolume": 25000.00,
+    #             "isCapped": true
+    #         }
+    #     ],
+    #     "calculatedAt": "2025-01-15T10:30:00Z"
+    # }
+
+    # DEPRECATED (keep for now, will remove later):
     teamVolumeTotal = Column(DECIMAL(12, 2), default=0.0)
+
+    # Personal Volume (накопительный)
+    personalVolumeTotal = Column(DECIMAL(12, 2), default=Decimal("0"), nullable=False)
 
     # MLM детали в JSON
     mlmStatus = Column(JSON, nullable=True)
@@ -199,20 +229,6 @@ class User(Base):
 
     def __repr__(self):
         return f"<User(userID={self.userID}, telegram={self.telegramID}, rank={self.rank})>"
-
-    @property
-    def isFilled(self):
-        """Обратная совместимость - проверяем dataFilled в personalData"""
-        if not self.personalData:
-            return False
-        return self.personalData.get('dataFilled', False)
-
-    @isFilled.setter
-    def isFilled(self, value):
-        """Обратная совместимость - устанавливаем dataFilled в personalData"""
-        if not self.personalData:
-            self.personalData = {}
-        self.personalData['dataFilled'] = value
 
     @property
     def emailConfirmed(self):

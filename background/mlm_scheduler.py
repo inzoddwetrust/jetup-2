@@ -1,22 +1,21 @@
-# bot/mlm_scheduler.py
+# background/mlm_scheduler.py
 """
 MLM Scheduler - handles all time-based MLM operations.
-Runs as background task like NotificationProcessor.
+Runs as background task with volume queue processing.
 """
 import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from mlm_system import (
-    VolumeService,
-    RankService,
-    GlobalPoolService,
-    timeMachine,
-    eventBus,
-    MLMEvents
-)
-from init import Session
+from core.db import get_session
+from models.user import User
+from models.bonus import Bonus
+from mlm_system.services.volume_service import VolumeService
+from mlm_system.services.rank_service import RankService
+from mlm_system.services.global_pool_service import GlobalPoolService
+from mlm_system.utils.time_machine import timeMachine
+from mlm_system.events.event_bus import eventBus, MLMEvents
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +37,19 @@ class MLMScheduler:
         self.lastMonth: Optional[str] = None
         self.isRunning = False
 
-        # Statistics - правильная типизация
+        # Volume queue processing interval (30 seconds)
+        self.queueCheckInterval = 30
+        self.lastQueueCheck: Optional[datetime] = None
+
+        # Statistics
         self.stats = {
             "tasksExecuted": 0,
             "errors": 0,
             "lastError": None,
             "startedAt": datetime.now(timezone.utc),
-            "lastExecutedAt": None
+            "lastExecutedAt": None,
+            "volumeQueueProcessed": 0,
+            "lastVolumeQueueCheck": None
         }
 
     async def run(self):
@@ -54,10 +59,16 @@ class MLMScheduler:
 
         while self.isRunning:
             try:
+                # Check scheduled tasks (hourly checks)
                 await self.checkScheduledTasks()
+
+                # Process volume queue (every 30 seconds)
+                await self.checkVolumeQueue()
+
                 await asyncio.sleep(self.checkInterval)
+
             except Exception as e:
-                logger.error(f"Error in MLM Scheduler: {e}")
+                logger.error(f"Error in MLM Scheduler: {e}", exc_info=True)
                 self.stats["errors"] += 1
                 self.stats["lastError"] = str(e)
                 await asyncio.sleep(60)  # Short pause on error
@@ -92,163 +103,197 @@ class MLMScheduler:
             if currentDay > 5:
                 self.lastMonth = currentMonth
 
+    async def checkVolumeQueue(self):
+        """
+        Check and process volume update queue.
+        Runs every 30 seconds independently of main scheduler.
+        """
+        now = datetime.now(timezone.utc)
+
+        # Check if enough time passed since last queue check
+        if self.lastQueueCheck:
+            elapsed = (now - self.lastQueueCheck).total_seconds()
+            if elapsed < self.queueCheckInterval:
+                return  # Not time yet
+
+        # Update last check time
+        self.lastQueueCheck = now
+
+        # Process queue
+        session = get_session()
+        try:
+            volume_service = VolumeService(session)
+            processed = await volume_service.processQueueBatch(batchSize=10)
+
+            if processed > 0:
+                self.stats["volumeQueueProcessed"] += processed
+                self.stats["lastVolumeQueueCheck"] = now.isoformat()
+                logger.info(f"Processed {processed} volume updates from queue")
+
+        except Exception as e:
+            logger.error(f"Error processing volume queue: {e}", exc_info=True)
+            self.stats["errors"] += 1
+        finally:
+            session.close()
+
     async def executeDailyTasks(self):
         """Execute daily tasks."""
-        logger.info("Executing daily MLM tasks")
+        logger.info(f"Executing daily tasks for {timeMachine.now.date()}")
+        session = get_session()
 
-        with Session() as session:
-            try:
-                # Check Grace Day
-                if timeMachine.isGraceDay:
-                    await self.processGraceDay(session)
+        try:
+            # Update rank qualifications
+            await self.checkRankQualifications(session)
 
-                # Update activity statuses
-                await self.updateActivityStatuses(session)
+            # Check Grace Day status
+            await self.processGraceDay(session)
 
-                # Check rank qualifications
-                rankService = RankService(session)
-                results = await rankService.checkAllRanks()
+            session.commit()
+            self.stats["tasksExecuted"] += 1
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
 
-                logger.info(f"Daily tasks complete: {results}")
-                self.stats["tasksExecuted"] += 1
-
-                session.commit()
-
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Error in daily tasks: {e}")
-                raise
+        except Exception as e:
+            logger.error(f"Error in daily tasks: {e}", exc_info=True)
+            session.rollback()
+            self.stats["errors"] += 1
+            self.stats["lastError"] = str(e)
+        finally:
+            session.close()
 
     async def executeFirstOfMonthTasks(self):
-        """Tasks for 1st of month."""
-        logger.info("Executing 1st of month tasks")
+        """Execute tasks on 1st of month."""
+        logger.info(f"Executing first-of-month tasks for {timeMachine.currentMonth}")
+        session = get_session()
 
-        with Session() as session:
-            try:
-                # Save monthly stats before reset
-                await self.saveAllMonthlyStats(session)
+        try:
+            # Reset monthly volumes
+            volumeService = VolumeService(session)
+            await volumeService.resetMonthlyVolumes()
 
-                # Reset monthly volumes
-                volumeService = VolumeService(session)
-                await volumeService.resetMonthlyVolumes()
+            # Process Autoship
+            await self.processAutoship(session)
 
-                # Emit event
-                await eventBus.emit(MLMEvents.MONTH_STARTED, {
-                    "month": timeMachine.currentMonth
-                })
+            # Fire event
+            await eventBus.emit(MLMEvents.MONTH_STARTED, {"month": timeMachine.currentMonth})
 
-                logger.info("1st of month tasks complete")
-                self.stats["tasksExecuted"] += 1
+            session.commit()
+            self.stats["tasksExecuted"] += 1
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
 
-                session.commit()
-
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Error in 1st of month tasks: {e}")
-                raise
+        except Exception as e:
+            logger.error(f"Error in first-of-month tasks: {e}", exc_info=True)
+            session.rollback()
+            self.stats["errors"] += 1
+            self.stats["lastError"] = str(e)
+        finally:
+            session.close()
 
     async def executeThirdOfMonthTasks(self):
-        """Tasks for 3rd of month."""
-        logger.info("Executing 3rd of month tasks")
+        """Execute tasks on 3rd of month."""
+        logger.info(f"Executing third-of-month tasks for {timeMachine.currentMonth}")
+        session = get_session()
 
-        with Session() as session:
-            try:
-                # Calculate Global Pool
-                poolService = GlobalPoolService(session)
-                result = await poolService.calculateMonthlyPool()
+        try:
+            # Calculate Global Pool
+            globalPoolService = GlobalPoolService(session)
+            await globalPoolService.calculateMonthlyPool()
 
-                if result["success"]:
-                    # Emit event
-                    await eventBus.emit(MLMEvents.GLOBAL_POOL_CALCULATED, result)
+            # Save monthly statistics
+            await self.saveMonthlyStats(session)
 
-                logger.info(f"3rd of month tasks complete: {result}")
-                self.stats["tasksExecuted"] += 1
+            session.commit()
+            self.stats["tasksExecuted"] += 1
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
 
-                session.commit()
-
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Error in 3rd of month tasks: {e}")
-                raise
+        except Exception as e:
+            logger.error(f"Error in third-of-month tasks: {e}", exc_info=True)
+            session.rollback()
+            self.stats["errors"] += 1
+            self.stats["lastError"] = str(e)
+        finally:
+            session.close()
 
     async def executeFifthOfMonthTasks(self):
-        """Tasks for 5th of month."""
-        logger.info("Executing 5th of month tasks")
+        """Execute tasks on 5th of month."""
+        logger.info(f"Executing fifth-of-month tasks for {timeMachine.currentMonth}")
+        session = get_session()
 
-        with Session() as session:
-            try:
-                # Distribute Global Pool
-                poolService = GlobalPoolService(session)
-                result = await poolService.distributeGlobalPool()
+        try:
+            # Process monthly payments
+            await self.processMonthlyPayments(session)
 
-                if result["success"]:
-                    # Emit event
-                    await eventBus.emit(MLMEvents.GLOBAL_POOL_DISTRIBUTED, result)
+            # Fire event
+            await eventBus.emit(MLMEvents.PAYMENTS_PROCESSED, {"month": timeMachine.currentMonth})
 
-                # Process any pending commissions
-                await self.processMonthlyPayments(session)
+            session.commit()
+            self.stats["tasksExecuted"] += 1
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
 
-                logger.info(f"5th of month tasks complete: {result}")
-                self.stats["tasksExecuted"] += 1
+        except Exception as e:
+            logger.error(f"Error in fifth-of-month tasks: {e}", exc_info=True)
+            session.rollback()
+            self.stats["errors"] += 1
+            self.stats["lastError"] = str(e)
+        finally:
+            session.close()
 
-                session.commit()
+    async def checkRankQualifications(self, session):
+        """Check rank qualifications for all users."""
+        rankService = RankService(session)
+        users = session.query(User).filter(User.isActive == True).all()
 
-            except Exception as e:
-                session.rollback()
-                logger.error(f"Error in 5th of month tasks: {e}")
-                raise
+        updatedCount = 0
+        for user in users:
+            newRank = await rankService.checkRankQualification(user.userID)
+            if newRank:
+                await rankService.updateUserRank(user.userID, newRank)
+                updatedCount += 1
+
+        if updatedCount > 0:
+            logger.info(f"Updated ranks for {updatedCount} users")
 
     async def processGraceDay(self, session):
-        """Process Grace Day bonuses."""
-        logger.info("Processing Grace Day")
+        """Process Grace Day bonuses if applicable."""
+        if not timeMachine.isGraceDay:
+            return
 
-        # Find users who paid on 1st
-        from models import User
-        from mlm_system.config.ranks import MINIMUM_PV
+        logger.info("Processing Grace Day bonuses")
 
+        # Find users who made purchases on Grace Day
         activeUsers = session.query(User).filter(
             User.isActive == True,
             User.lastActiveMonth == timeMachine.currentMonth
         ).all()
 
-        graceDayCount = 0
-        for user in activeUsers:
-            if user.mlmVolumes:
-                monthlyPV = user.mlmVolumes.get("monthlyPV", "0")
-                if float(monthlyPV) >= float(MINIMUM_PV):
-                    # User paid on Grace Day - could add bonus here
-                    graceDayCount += 1
+        # TODO: Implement Grace Day bonus logic (+5% options)
+        # This will be implemented later as per CODE_COMPLIANCE_REPORT
 
-        logger.info(f"Grace Day: {graceDayCount} users activated on 1st")
+        logger.info(f"Processed Grace Day for {len(activeUsers)} active users")
 
-    async def updateActivityStatuses(self, session):
-        """Update all users' activity statuses."""
-        from models import User
+    async def processAutoship(self, session):
+        """Process Autoship subscriptions."""
+        logger.info("Processing Autoship subscriptions")
 
-        rankService = RankService(session)
-        users = session.query(User).all()
+        # Find users with Autoship enabled
+        users = session.query(User).filter(
+            User.mlmVolumes.isnot(None)
+        ).all()
 
-        updatedCount = 0
+        autoshipCount = 0
         for user in users:
-            wasActive = user.isActive
-            await rankService.updateMonthlyActivity(user.userID)
+            if not user.mlmVolumes:
+                continue
 
-            if user.isActive != wasActive:
-                updatedCount += 1
+            autoship_config = user.mlmVolumes.get("autoship", {})
+            if autoship_config.get("enabled", False):
+                # TODO: Implement Autoship purchase logic
+                # This will be implemented later as per CODE_COMPLIANCE_REPORT
+                autoshipCount += 1
 
-                # Emit event
-                eventName = MLMEvents.USER_ACTIVATED if user.isActive else MLMEvents.USER_DEACTIVATED
-                await eventBus.emit(eventName, {
-                    "userId": user.userID,
-                    "telegramId": user.telegramID
-                })
+        logger.info(f"Found {autoshipCount} users with Autoship enabled")
 
-        logger.info(f"Updated activity status for {updatedCount} users")
-
-    async def saveAllMonthlyStats(self, session):
+    async def saveMonthlyStats(self, session):
         """Save monthly statistics for all users."""
-        from models import User
-
         rankService = RankService(session)
         users = session.query(User).all()
 
@@ -261,8 +306,6 @@ class MLMScheduler:
 
     async def processMonthlyPayments(self, session):
         """Process any pending monthly payments."""
-        from models import Bonus
-
         # Mark all pending bonuses as processed
         pendingBonuses = session.query(Bonus).filter(
             Bonus.status == "pending"
@@ -285,6 +328,7 @@ class MLMScheduler:
             "lastDay": self.lastDay,
             "lastMonth": self.lastMonth,
             "checkInterval": self.checkInterval,
+            "queueCheckInterval": self.queueCheckInterval,
             "stats": self.stats
         }
 
