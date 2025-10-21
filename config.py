@@ -1,4 +1,4 @@
-# jetup/config.py
+# jetup-2/config.py
 """
 Configuration management for Jetup bot.
 Loads from .env and Google Sheets, validates critical keys.
@@ -69,6 +69,18 @@ class Config:
     # MLM System
     DEFAULT_REFERRER_ID = "DEFAULT_REFERRER_ID"
     STRATEGY_COEFFICIENTS = "STRATEGY_COEFFICIENTS"
+
+    # Payment & Wallets
+    WALLET_TRC = "WALLET_TRC"
+    WALLET_ETH = "WALLET_ETH"
+    WALLETS = "WALLETS"
+    STABLECOINS = "STABLECOINS"
+    TX_BROWSERS = "TX_BROWSERS"
+
+    # Blockchain APIs
+    ETHERSCAN_API_KEY = "ETHERSCAN_API_KEY"
+    BSCSCAN_API_KEY = "BSCSCAN_API_KEY"
+    TRON_API_KEY = "TRON_API_KEY"
 
     # System
     SYSTEM_READY = "SYSTEM_READY"
@@ -171,6 +183,35 @@ class Config:
             cls._config[cls.DEFAULT_REFERRER_ID] = int(
                 os.getenv("DEFAULT_REFERRER_ID", "526738615")
             )
+
+            # Wallets and Payment Configuration
+            cls._config[cls.WALLET_TRC] = os.getenv("WALLET_TRC")
+            cls._config[cls.WALLET_ETH] = os.getenv("WALLET_ETH")
+
+            cls._config[cls.WALLETS] = {
+                "USDT-TRC20": cls._config[cls.WALLET_TRC],
+                "TRX": cls._config[cls.WALLET_TRC],
+                "ETH": cls._config[cls.WALLET_ETH],
+                "BNB": cls._config[cls.WALLET_ETH],
+                "USDT-BSC20": cls._config[cls.WALLET_ETH],
+                "USDT-ERC20": cls._config[cls.WALLET_ETH]
+            }
+
+            cls._config[cls.STABLECOINS] = ["USDT-ERC20", "USDT-BSC20", "USDT-TRC20"]
+
+            cls._config[cls.TX_BROWSERS] = {
+                "ETH": "https://etherscan.io/tx/",
+                "BNB": "https://bscscan.com/tx/",
+                "USDT-ERC20": "https://etherscan.io/tx/",
+                "USDT-BSC20": "https://bscscan.com/tx/",
+                "TRX": "https://tronscan.org/#/transaction/",
+                "USDT-TRC20": "https://tronscan.org/#/transaction/"
+            }
+
+            # Blockchain API Keys
+            cls._config[cls.ETHERSCAN_API_KEY] = os.getenv("ETHERSCAN_API_KEY")
+            cls._config[cls.BSCSCAN_API_KEY] = os.getenv("BSCSCAN_API_KEY")
+            cls._config[cls.TRON_API_KEY] = os.getenv("TRON_API_KEY")
 
             # Channels (JSON format)
             channels_str = os.getenv("REQUIRED_CHANNELS", "[]")

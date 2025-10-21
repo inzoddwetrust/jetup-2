@@ -1,3 +1,6 @@
+"""
+TXID validation and blockchain transaction verification.
+"""
 import re
 import aiohttp
 import logging
@@ -6,10 +9,13 @@ from enum import Enum
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import config
+from config import Config
+
+logger = logging.getLogger(__name__)
 
 
 class TxidValidationCode(Enum):
+    """TXID validation result codes."""
     VALID_TRANSACTION = "valid"
     INVALID_PREFIX = "invalid_prefix"
     INVALID_LENGTH = "invalid_length"
@@ -23,8 +29,25 @@ class TxidValidationCode(Enum):
     NEEDS_CONFIRMATION = "needs_confirm"
 
 
+# Template mapping for TXID validation errors
+TXID_TEMPLATE_MAPPING = {
+    TxidValidationCode.VALID_TRANSACTION: 'txid_success',
+    TxidValidationCode.INVALID_PREFIX: 'txid_invalid_format',
+    TxidValidationCode.INVALID_LENGTH: 'txid_invalid_format',
+    TxidValidationCode.INVALID_CHARS: 'txid_invalid_format',
+    TxidValidationCode.UNSUPPORTED_METHOD: 'txid_unsupported_method',
+    TxidValidationCode.TRANSACTION_NOT_FOUND: 'txid_not_found',
+    TxidValidationCode.WRONG_RECIPIENT: 'txid_wrong_recipient',
+    TxidValidationCode.WRONG_NETWORK: 'txid_wrong_network',
+    TxidValidationCode.API_ERROR: 'txid_api_error',
+    TxidValidationCode.TXID_ALREADY_USED: 'txid_already_used',
+    TxidValidationCode.NEEDS_CONFIRMATION: 'txid_needs_confirmation'
+}
+
+
 @dataclass
 class ValidationResult:
+    """Result of TXID validation."""
     code: TxidValidationCode
     details: Optional[str] = None
     from_address: Optional[str] = None
@@ -34,7 +57,13 @@ class ValidationResult:
 def validate_txid(txid: str, method: str) -> ValidationResult:
     """
     Validates TXID format based on payment method.
-    Returns validation code and optional details.
+
+    Args:
+        txid: Transaction ID
+        method: Payment method (ETH, BNB, USDT-TRC20, etc.)
+
+    Returns:
+        ValidationResult with code and optional details
     """
     txid = txid.lower().strip()
 
@@ -62,10 +91,18 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
     """
     Verifies transaction details using blockchain APIs.
     Uses Etherscan API V2 for all EVM chains.
+
+    Args:
+        txid: Transaction ID
+        method: Payment method
+        expected_address: Expected recipient address (our wallet)
+
+    Returns:
+        ValidationResult with transaction details
     """
     try:
-        logging.info(f"Starting verification for txid: {txid}, method: {method}")
-        logging.info(f"Expected recipient address: {expected_address}")
+        logger.info(f"Starting verification for txid: {txid}, method: {method}")
+        logger.info(f"Expected recipient address: {expected_address}")
 
         # Route to appropriate verifier based on method
         if method == "ETH":
@@ -81,7 +118,7 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
         else:
             return ValidationResult(TxidValidationCode.UNSUPPORTED_METHOD)
 
-        logging.info(f"Verification result: {result}")
+        logger.info(f"Verification result: {result}")
 
         if result is None:
             return ValidationResult(TxidValidationCode.TRANSACTION_NOT_FOUND)
@@ -90,7 +127,7 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
 
         # Check recipient address
         if to_addr.lower() != expected_address.lower():
-            logging.warning(f"Wrong recipient! Expected: {expected_address}, Got: {to_addr}")
+            logger.warning(f"Wrong recipient! Expected: {expected_address}, Got: {to_addr}")
             return ValidationResult(
                 TxidValidationCode.WRONG_RECIPIENT,
                 from_address=from_addr,
@@ -104,7 +141,7 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
         )
 
     except Exception as e:
-        logging.error(f"Error verifying transaction {txid}: {e}", exc_info=True)
+        logger.error(f"Error verifying transaction {txid}: {e}", exc_info=True)
         return ValidationResult(TxidValidationCode.API_ERROR, details=str(e))
 
 
@@ -112,6 +149,13 @@ async def _verify_native_evm_transaction(txid: str, chain_id: int) -> Optional[T
     """
     Verifies native coin transactions (ETH, BNB) using Etherscan API V2.
     For native coins, we check the 'to' field directly.
+
+    Args:
+        txid: Transaction ID
+        chain_id: Chain ID (1 for Ethereum, 56 for BSC)
+
+    Returns:
+        Tuple of (from_address, to_address) or None if not found
     """
     url = "https://api.etherscan.io/v2/api"
 
@@ -120,10 +164,10 @@ async def _verify_native_evm_transaction(txid: str, chain_id: int) -> Optional[T
         "module": "proxy",
         "action": "eth_getTransactionByHash",
         "txhash": txid,
-        "apikey": config.ETHERSCAN_API_KEY
+        "apikey": Config.get(Config.ETHERSCAN_API_KEY)
     }
 
-    logging.info(f"V2 API request for native coin - Chain: {chain_id}, TXID: {txid}")
+    logger.info(f"V2 API request for native coin - Chain: {chain_id}, TXID: {txid}")
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as response:
@@ -132,7 +176,7 @@ async def _verify_native_evm_transaction(txid: str, chain_id: int) -> Optional[T
                     data = await response.json()
 
                     if data.get("status") == "0":
-                        logging.error(f"V2 API error: {data.get('message')}")
+                        logger.error(f"V2 API error: {data.get('message')}")
                         return None
 
                     result = data.get("result")
@@ -141,13 +185,13 @@ async def _verify_native_evm_transaction(txid: str, chain_id: int) -> Optional[T
                         from_address = result.get("from")
                         to_address = result.get("to")
 
-                        logging.info(f"Native transaction - from: {from_address}, to: {to_address}")
+                        logger.info(f"Native transaction - from: {from_address}, to: {to_address}")
 
                         if from_address and to_address:
                             return from_address, to_address
 
                 except Exception as e:
-                    logging.error(f"Error parsing V2 API response: {e}", exc_info=True)
+                    logger.error(f"Error parsing V2 API response: {e}", exc_info=True)
 
     return None
 
@@ -156,6 +200,13 @@ async def _verify_erc20_token_transaction(txid: str, chain_id: int) -> Optional[
     """
     Verifies ERC20/BEP20 token transactions (USDT) using Etherscan API V2.
     For tokens, we need to decode the input data or use transaction receipt logs.
+
+    Args:
+        txid: Transaction ID
+        chain_id: Chain ID (1 for Ethereum, 56 for BSC)
+
+    Returns:
+        Tuple of (from_address, to_address) or None if not found
     """
     url = "https://api.etherscan.io/v2/api"
 
@@ -165,10 +216,10 @@ async def _verify_erc20_token_transaction(txid: str, chain_id: int) -> Optional[
         "module": "proxy",
         "action": "eth_getTransactionReceipt",
         "txhash": txid,
-        "apikey": config.ETHERSCAN_API_KEY
+        "apikey": Config.get(Config.ETHERSCAN_API_KEY)
     }
 
-    logging.info(f"V2 API request for token transfer - Chain: {chain_id}, TXID: {txid}")
+    logger.info(f"V2 API request for token transfer - Chain: {chain_id}, TXID: {txid}")
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as response:
@@ -177,7 +228,7 @@ async def _verify_erc20_token_transaction(txid: str, chain_id: int) -> Optional[
                     data = await response.json()
 
                     if data.get("status") == "0":
-                        logging.error(f"V2 API error: {data.get('message')}")
+                        logger.error(f"V2 API error: {data.get('message')}")
                         return None
 
                     result = data.get("result")
@@ -198,7 +249,7 @@ async def _verify_erc20_token_transaction(txid: str, chain_id: int) -> Optional[
                                 # Extract addresses from topics (remove 0x prefix and padding)
                                 to_address = "0x" + topics[2][-40:]  # Last 40 chars are the address
 
-                                logging.info(f"Token transfer - from: {from_address}, to: {to_address}")
+                                logger.info(f"Token transfer - from: {from_address}, to: {to_address}")
                                 return from_address, to_address
 
                         # Alternative: Try to decode input data
@@ -208,7 +259,7 @@ async def _verify_erc20_token_transaction(txid: str, chain_id: int) -> Optional[
                             "module": "proxy",
                             "action": "eth_getTransactionByHash",
                             "txhash": txid,
-                            "apikey": config.ETHERSCAN_API_KEY
+                            "apikey": Config.get(Config.ETHERSCAN_API_KEY)
                         }
 
                         async with session.get(url, params=tx_params) as tx_response:
@@ -227,12 +278,12 @@ async def _verify_erc20_token_transaction(txid: str, chain_id: int) -> Optional[
                                             # Extract recipient (skip method id and padding)
                                             to_address = "0x" + input_data[34:74]
 
-                                            logging.info(
+                                            logger.info(
                                                 f"Token transfer from input - from: {from_address}, to: {to_address}")
                                             return from_address, to_address
 
                 except Exception as e:
-                    logging.error(f"Error parsing token transaction: {e}", exc_info=True)
+                    logger.error(f"Error parsing token transaction: {e}", exc_info=True)
 
     return None
 
@@ -241,18 +292,24 @@ async def _verify_tron_transaction(txid: str) -> Optional[Tuple[str, str]]:
     """
     Verifies TRON transaction.
     TRON is not EVM, so we keep using their native API.
+
+    Args:
+        txid: Transaction ID
+
+    Returns:
+        Tuple of (from_address, to_address) or None if not found
     """
     url = "https://apilist.tronscan.org/api/transaction-info"
     params = {"hash": txid}
 
-    logging.info(f"TRON API request for txid: {txid}")
+    logger.info(f"TRON API request for txid: {txid}")
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as response:
             if response.status == 200:
                 try:
                     text = await response.text()
-                    logging.info(f"TRON API raw response: {text[:500]}")
+                    logger.info(f"TRON API raw response: {text[:500]}")
 
                     data = json.loads(text)
 
@@ -276,6 +333,6 @@ async def _verify_tron_transaction(txid: str) -> Optional[Tuple[str, str]]:
                                         return from_addr, to_addr
 
                 except Exception as e:
-                    logging.error(f"Error parsing TRON response: {e}", exc_info=True)
+                    logger.error(f"Error parsing TRON response: {e}", exc_info=True)
 
     return None

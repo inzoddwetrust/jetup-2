@@ -7,7 +7,7 @@ import asyncio
 import logging
 import signal
 import traceback
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
 
@@ -29,6 +29,7 @@ class ServiceManager:
         """
         self.bot = bot
         self.services: List[asyncio.Task] = []
+        self.invoice_cleaner: Optional['InvoiceCleaner'] = None
         self._shutdown_event = asyncio.Event()
 
     async def start_services(self) -> None:
@@ -36,9 +37,10 @@ class ServiceManager:
         Start all background services.
 
         Services to start:
-        - MLM scheduler (monthly calculations)
-        - Invoice cleaner (old unpaid invoices)
         - Notification processor (pending notifications)
+        - Transfer bonus processor (transfer bonuses)
+        - Invoice cleaner (old unpaid invoices)
+        - MLM scheduler (monthly calculations)
         - Legacy user processor (migration)
         - Sync system webhook (if enabled)
         """
@@ -58,6 +60,13 @@ class ServiceManager:
         self.services.append(task)
         logger.info("✓ Transfer Bonus Processor started")
 
+        # Start Invoice Cleaner
+        from background.invoice_cleaner import InvoiceCleaner
+        self.invoice_cleaner = InvoiceCleaner(check_interval=300)
+        task = asyncio.create_task(self.invoice_cleaner.run(), name="invoice_cleaner")
+        self.services.append(task)
+        logger.info("✓ Invoice cleaner started")
+
         # TODO: Import and start services when ready
         # Example:
         # from background.mlm_scheduler import MLMScheduler
@@ -70,6 +79,10 @@ class ServiceManager:
     async def stop_services(self) -> None:
         """Stop all background services gracefully."""
         logger.info("Stopping background services...")
+
+        # Stop invoice cleaner
+        if self.invoice_cleaner:
+            await self.invoice_cleaner.stop()
 
         # Cancel all service tasks
         for task in self.services:
