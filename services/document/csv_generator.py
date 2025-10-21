@@ -6,7 +6,7 @@ Generates various reports in CSV format for users.
 import io
 import csv
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -107,33 +107,26 @@ class CSVGenerator:
     ) -> Tuple[List[str], List[List[Any]]]:
         """
         Generate full team report with referrals.
-
-        Returns:
-            (headers, data_rows)
+        Uses ChainWalker for safe team size calculation.
         """
+        from mlm_system.utils.chain_walker import ChainWalker
+
         headers = [
             "ID", "Name", "Registration Date", "Level",
             "Direct Referrals", "Total Team", "Purchases Amount", "Bonus Gained",
             "Purchase ID", "Purchase Date", "Project", "Shares", "Price"
         ]
 
-        def get_team_size(telegram_id, visited=None):
-            """Recursively calculate team size."""
-            if visited is None:
-                visited = set()
+        walker = ChainWalker(session)
 
-            referrals = session.query(User.telegramID).filter(
-                User.upline == telegram_id
-            ).all()
+        def get_team_size(telegram_id: int) -> int:
+            """Calculate team size for a user using ChainWalker."""
+            target_user = session.query(User).filter_by(telegramID=telegram_id).first()
+            if not target_user:
+                return 0
+            return walker.count_downline(target_user)
 
-            total = 0
-            for (ref_id,) in referrals:
-                if ref_id not in visited:
-                    visited.add(ref_id)
-                    total += 1 + get_team_size(ref_id, visited)
-            return total
-
-        def get_referral_tree(telegram_id, level=1, visited=None):
+        def get_referral_tree(telegram_id: int, level: int = 1, visited: Optional[Set] = None) -> List:
             """Recursively build referral tree."""
             if visited is None:
                 visited = set()
@@ -142,10 +135,24 @@ class CSVGenerator:
                 return []
 
             visited.add(telegram_id)
+
+            # Get user
+            root_user = session.query(User).filter_by(telegramID=telegram_id).first()
+            if not root_user:
+                return []
+
+            # Don't traverse into system root
+            if walker.is_system_root(root_user):
+                return []
+
             referrals = session.query(User).filter(User.upline == telegram_id).all()
 
             result = []
             for ref in referrals:
+                # Skip system root in downline
+                if walker.is_system_root(ref):
+                    continue
+
                 # Get basic info
                 direct_refs_count = session.query(func.count(User.userID)).filter(
                     User.upline == ref.telegramID
@@ -196,8 +203,9 @@ class CSVGenerator:
                     ])
                     result.append(purchase_row)
 
-                # Add nested referrals
-                result.extend(get_referral_tree(ref.telegramID, level + 1, visited))
+                # Add nested referrals (with depth limit via visited set)
+                if level < 50:  # Safety limit
+                    result.extend(get_referral_tree(ref.telegramID, level + 1, visited))
 
             return result
 

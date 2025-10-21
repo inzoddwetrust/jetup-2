@@ -404,29 +404,29 @@ class VolumeService:
         """
         Update Full Volume up the upline chain.
         Fast operation - simple sum, no 50% rule.
+        Uses ChainWalker for safe upline traversal.
         """
-        currentUser = user
-        depth = 0
-        max_depth = 50
+        from mlm_system.utils.chain_walker import ChainWalker
 
-        while currentUser.upline and depth < max_depth:
-            uplineUser = self.session.query(User).filter_by(
-                telegramID=currentUser.upline
-            ).first()
+        walker = ChainWalker(self.session)
 
-            if not uplineUser:
-                break
-
+        def update_volume(upline_user: User, level: int) -> bool:
+            """Update FV for each upline user."""
             # Update FV (simple sum)
-            uplineUser.fullVolume = (uplineUser.fullVolume or Decimal("0")) + amount
+            upline_user.fullVolume = (upline_user.fullVolume or Decimal("0")) + amount
 
             # DEPRECATED: Also update old teamVolumeTotal for compatibility
-            uplineUser.teamVolumeTotal = (uplineUser.teamVolumeTotal or Decimal("0")) + amount
+            upline_user.teamVolumeTotal = (upline_user.teamVolumeTotal or Decimal("0")) + amount
 
-            logger.debug(f"Updated FV for user {uplineUser.userID}: {uplineUser.fullVolume}")
+            logger.debug(
+                f"Updated FV for user {upline_user.userID}: {upline_user.fullVolume} "
+                f"(level {level})"
+            )
 
-            currentUser = uplineUser
-            depth += 1
+            return True  # Continue to next upline
+
+        # Walk up the chain safely
+        walker.walk_upline(user, update_volume)
 
     async def _calculateBranchesVolumes(self, userId: int) -> List[Dict]:
         """
@@ -496,20 +496,26 @@ class VolumeService:
         """
         Check if there's a Director rank in the branch.
         Used by Global Pool service.
+        Uses ChainWalker for safe downline traversal.
         """
+        from mlm_system.utils.chain_walker import ChainWalker
+
+        # Check root first
         if rootUser.rank == "director":
             return True
 
-        # Check all downline recursively
-        downline = self.session.query(User).filter(
-            User.upline == rootUser.telegramID
-        ).all()
+        walker = ChainWalker(self.session)
+        found_director = [False]  # Use list to allow modification in callback
 
-        for user in downline:
-            if await self._checkForDirectorInBranch(user):
-                return True
+        def check_director(downline_user: User, level: int):
+            """Check each downline user for Director rank."""
+            if downline_user.rank == "director":
+                found_director[0] = True
 
-        return False
+        # Walk downline
+        walker.walk_downline(rootUser, check_director)
+
+        return found_director[0]
 
     def _getNextRank(self, currentRank: str) -> str:
         """Get next rank in hierarchy."""

@@ -78,59 +78,61 @@ class CommissionService:
             self,
             purchase: Purchase
     ) -> List[Dict]:
-        """Calculate differential commissions up the chain."""
+        """
+        Calculate differential commissions up the chain.
+        Uses ChainWalker for safe upline traversal.
+        """
+        from mlm_system.utils.chain_walker import ChainWalker
+
         commissions = []
-        currentUser = purchase.user
         lastPercentage = Decimal("0")
-        level = 1
 
-        # Walk up the upline chain
-        while currentUser.upline:
-            uplineUser = self.session.query(User).filter_by(
-                telegramID=currentUser.upline
-            ).first()
+        walker = ChainWalker(self.session)
 
-            if not uplineUser:
-                break
+        def process_upline(upline_user: User, level: int) -> bool:
+            """Process each upline user for commission calculation."""
+            nonlocal lastPercentage
 
             # Check if upline is active
-            if not uplineUser.isActive:
+            if not upline_user.isActive:
                 # Mark for compression - will be handled in next step
                 commissions.append({
-                    "userId": uplineUser.userID,
-                    "percentage": self._getUserRankPercentage(uplineUser),
+                    "userId": upline_user.userID,
+                    "percentage": self._getUserRankPercentage(upline_user),
                     "amount": Decimal("0"),
                     "level": level,
-                    "rank": uplineUser.rank,
+                    "rank": upline_user.rank,
                     "isActive": False,
                     "compressed": True
                 })
             else:
                 # Calculate differential
-                userPercentage = self._getUserRankPercentage(uplineUser)
+                userPercentage = self._getUserRankPercentage(upline_user)
                 differential = userPercentage - lastPercentage
 
                 if differential > 0:
                     amount = Decimal(str(purchase.packPrice)) * differential
 
                     commissions.append({
-                        "userId": uplineUser.userID,
+                        "userId": upline_user.userID,
                         "percentage": differential,
                         "amount": amount,
                         "level": level,
-                        "rank": uplineUser.rank,
+                        "rank": upline_user.rank,
                         "isActive": True,
                         "compressed": False
                     })
 
                     lastPercentage = userPercentage
 
-            currentUser = uplineUser
-            level += 1
-
             # Stop at max percentage
             if lastPercentage >= Decimal("0.18"):
-                break
+                return False  # Stop walking
+
+            return True  # Continue walking
+
+        # Walk up the chain safely
+        walker.walk_upline(purchase.user, process_upline)
 
         return commissions
 

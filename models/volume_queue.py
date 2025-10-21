@@ -4,9 +4,8 @@ Queue for volume recalculation tasks.
 Will be replaced with Redis in microservices architecture.
 """
 from sqlalchemy import Column, Integer, String, DateTime
-from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime, timezone
-from init import Base
+from models.base import Base
 
 
 class VolumeUpdateTask(Base):
@@ -15,8 +14,8 @@ class VolumeUpdateTask(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     userId = Column(Integer, nullable=False, index=True)
-    priority = Column(Integer, default=0, index=True)  # Higher = first
-    status = Column(String(20), default='pending', index=True)  # pending, processing, completed, failed
+    priority = Column(Integer, default=0, index=True)
+    status = Column(String(20), default='pending', index=True)
     createdAt = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
     startedAt = Column(DateTime, nullable=True)
     completedAt = Column(DateTime, nullable=True)

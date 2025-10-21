@@ -322,17 +322,15 @@ class RankService:
         return True
 
     async def _countTotalTeamSize(self, user: User) -> int:
-        """Count total team size recursively."""
+        """
+        Count total team size recursively.
+        Uses ChainWalker for safe downline traversal.
+        """
+        from mlm_system.utils.chain_walker import ChainWalker
 
-        def countDownline(telegramId: int) -> int:
-            directReferrals = self.session.query(User).filter(
-                User.upline == telegramId
-            ).all()
+        walker = ChainWalker(self.session)
 
-            count = len(directReferrals)
-            for ref in directReferrals:
-                count += countDownline(ref.telegramID)
+        # Use walker to count all downline
+        total_count = walker.count_downline(user)
 
-            return count
-
-        return countDownline(user.telegramID)
+        return total_count

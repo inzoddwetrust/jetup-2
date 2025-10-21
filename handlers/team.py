@@ -35,6 +35,8 @@ async def handle_team(
         message_manager: MessageManager
 ):
     """Show main team screen with referral counts."""
+    from mlm_system.utils.chain_walker import ChainWalker
+
     logger.info(f"User {user.userID} opened team screen")
 
     # Count direct referrals
@@ -42,23 +44,9 @@ async def handle_team(
         User.upline == user.telegramID
     ).scalar() or 0
 
-    # Count all referrals recursively
-    def get_all_referrals(telegram_id, visited=None):
-        if visited is None:
-            visited = set()
-
-        referrals = session.query(User.telegramID).filter(
-            User.upline == telegram_id
-        ).all()
-
-        total = 0
-        for (ref_id,) in referrals:
-            if ref_id not in visited:
-                visited.add(ref_id)
-                total += 1 + get_all_referrals(ref_id, visited)
-        return total
-
-    upline_total = get_all_referrals(user.telegramID)
+    # Count all referrals recursively using ChainWalker
+    walker = ChainWalker(session)
+    upline_total = walker.count_downline(user)
 
     await message_manager.send_template(
         user=user,
