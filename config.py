@@ -69,6 +69,7 @@ class Config:
     # MLM System
     DEFAULT_REFERRER_ID = "DEFAULT_REFERRER_ID"
     STRATEGY_COEFFICIENTS = "STRATEGY_COEFFICIENTS"
+    INVESTMENT_BONUS_TIERS = "INVESTMENT_BONUS_TIERS"
 
     # Payment & Wallets
     WALLET_TRC = "WALLET_TRC"
@@ -129,6 +130,7 @@ class Config:
 
         try:
             import json
+            from decimal import Decimal
 
             # Telegram
             cls._config[cls.API_TOKEN] = os.getenv("API_TOKEN")
@@ -169,44 +171,104 @@ class Config:
             cls._config[cls.SMTP_USERNAME] = os.getenv("SMTP_USERNAME")
             cls._config[cls.SMTP_PASSWORD] = os.getenv("SMTP_PASSWORD")
             cls._config[cls.SMTP_USE_TLS] = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
-            cls._config[cls.SMTP_FROM_EMAIL] = os.getenv(
-                "SMTP_FROM_EMAIL",
-                "noreply@talentir.info"
-            )
+            cls._config[cls.SMTP_FROM_EMAIL] = os.getenv("SMTP_FROM_EMAIL")
+
+            # Parse secure email domains (JSON array)
+            secure_domains_str = os.getenv("SECURE_EMAIL_DOMAINS", "[]")
+            try:
+                cls._config[cls.SECURE_EMAIL_DOMAINS] = json.loads(secure_domains_str)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse SECURE_EMAIL_DOMAINS JSON: {e}")
+                cls._config[cls.SECURE_EMAIL_DOMAINS] = []
 
             # BookStack
             cls._config[cls.BOOKSTACK_URL] = os.getenv("BOOKSTACK_URL")
             cls._config[cls.BOOKSTACK_TOKEN_ID] = os.getenv("BOOKSTACK_TOKEN_ID")
             cls._config[cls.BOOKSTACK_TOKEN_SECRET] = os.getenv("BOOKSTACK_TOKEN_SECRET")
 
-            # MLM
-            cls._config[cls.DEFAULT_REFERRER_ID] = int(
-                os.getenv("DEFAULT_REFERRER_ID", "526738615")
-            )
+            # MLM System
+            cls._config[cls.DEFAULT_REFERRER_ID] = os.getenv("DEFAULT_REFERRER_ID")
 
-            # Wallets and Payment Configuration
+            # Strategy coefficients (JSON format)
+            strategy_str = os.getenv("STRATEGY_COEFFICIENTS", "{}")
+            try:
+                cls._config[cls.STRATEGY_COEFFICIENTS] = json.loads(strategy_str)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse STRATEGY_COEFFICIENTS JSON: {e}")
+                cls._config[cls.STRATEGY_COEFFICIENTS] = {}
+
+            # ═══════════════════════════════════════════════════════════════════════
+            # MLM - INVESTMENT PACKAGE BONUSES
+            # ═══════════════════════════════════════════════════════════════════════
+
+            investment_tiers_str = os.getenv("INVESTMENT_BONUS_TIERS")
+            if investment_tiers_str:
+                try:
+                    # Parse JSON and convert to Decimal for precision
+                    tiers_dict = json.loads(investment_tiers_str)
+                    parsed_tiers = {
+                        Decimal(str(k)): Decimal(str(v))
+                        for k, v in tiers_dict.items()
+                    }
+                    cls._config[cls.INVESTMENT_BONUS_TIERS] = parsed_tiers
+                    logger.info(f"✓ Loaded {len(parsed_tiers)} investment bonus tiers from .env")
+                except Exception as e:
+                    logger.error(f"Error parsing INVESTMENT_BONUS_TIERS: {e}")
+                    # Set default tiers on error
+                    cls._config[cls.INVESTMENT_BONUS_TIERS] = {
+                        Decimal("1000"): Decimal("0.05"),
+                        Decimal("5000"): Decimal("0.10"),
+                        Decimal("25000"): Decimal("0.15"),
+                        Decimal("125000"): Decimal("0.20")
+                    }
+                    logger.warning("Using default investment bonus tiers")
+            else:
+                # Default tiers if not configured in .env
+                cls._config[cls.INVESTMENT_BONUS_TIERS] = {
+                    Decimal("1000"): Decimal("0.05"),
+                    Decimal("5000"): Decimal("0.10"),
+                    Decimal("25000"): Decimal("0.15"),
+                    Decimal("125000"): Decimal("0.20")
+                }
+                logger.info("✓ Using default investment bonus tiers (not configured in .env)")
+
+            # Payment & Wallets
             cls._config[cls.WALLET_TRC] = os.getenv("WALLET_TRC")
             cls._config[cls.WALLET_ETH] = os.getenv("WALLET_ETH")
 
-            cls._config[cls.WALLETS] = {
-                "USDT-TRC20": cls._config[cls.WALLET_TRC],
-                "TRX": cls._config[cls.WALLET_TRC],
-                "ETH": cls._config[cls.WALLET_ETH],
-                "BNB": cls._config[cls.WALLET_ETH],
-                "USDT-BSC20": cls._config[cls.WALLET_ETH],
-                "USDT-ERC20": cls._config[cls.WALLET_ETH]
-            }
+            # Wallets (JSON format)
+            wallets_str = os.getenv("WALLETS", "{}")
+            try:
+                cls._config[cls.WALLETS] = json.loads(wallets_str)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse WALLETS JSON: {e}")
+                cls._config[cls.WALLETS] = {}
 
-            cls._config[cls.STABLECOINS] = ["USDT-ERC20", "USDT-BSC20", "USDT-TRC20"]
+            # Stablecoins (JSON format)
+            stablecoins_str = os.getenv("STABLECOINS", "{}")
+            try:
+                cls._config[cls.STABLECOINS] = json.loads(stablecoins_str)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse STABLECOINS JSON: {e}")
+                cls._config[cls.STABLECOINS] = {
+                    "USDT-ERC20": "ETH",
+                    "USDT-BSC20": "BSC",
+                    "USDT-TRC20": "TRX"
+                }
 
-            cls._config[cls.TX_BROWSERS] = {
-                "ETH": "https://etherscan.io/tx/",
-                "BNB": "https://bscscan.com/tx/",
-                "USDT-ERC20": "https://etherscan.io/tx/",
-                "USDT-BSC20": "https://bscscan.com/tx/",
-                "TRX": "https://tronscan.org/#/transaction/",
-                "USDT-TRC20": "https://tronscan.org/#/transaction/"
-            }
+            # Transaction browsers
+            tx_browsers_str = os.getenv("TX_BROWSERS", "{}")
+            try:
+                cls._config[cls.TX_BROWSERS] = json.loads(tx_browsers_str)
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse TX_BROWSERS JSON: {e}")
+                cls._config[cls.TX_BROWSERS] = {
+                    "ETH": "https://etherscan.io/tx/",
+                    "USDT-ERC20": "https://etherscan.io/tx/",
+                    "USDT-BSC20": "https://bscscan.com/tx/",
+                    "TRX": "https://tronscan.org/#/transaction/",
+                    "USDT-TRC20": "https://tronscan.org/#/transaction/"
+                }
 
             # Blockchain API Keys
             cls._config[cls.ETHERSCAN_API_KEY] = os.getenv("ETHERSCAN_API_KEY")

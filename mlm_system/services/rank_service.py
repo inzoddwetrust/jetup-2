@@ -1,4 +1,4 @@
-# bot/mlm_system/services/rank_service.py
+# mlm_system/services/rank_service.py
 """
 Rank management service for MLM system.
 """
@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 import logging
 
-from models import User, Bonus, RankHistory, MonthlyStats
+from models.user import User
+from models.bonus import Bonus
+from models.mlm.rank_history import RankHistory
+from models.mlm.monthly_stats import MonthlyStats
 from mlm_system.config.ranks import RANK_CONFIG, Rank
 from mlm_system.utils.time_machine import timeMachine
 
@@ -48,22 +51,53 @@ class RankService:
         return None
 
     async def _isQualifiedForRank(self, user: User, rank: str) -> bool:
-        """Check if user meets requirements for specific rank."""
+        """
+        Check if user meets requirements for specific rank.
+        Uses totalVolume.qualifyingVolume with 50% rule applied.
+        """
         try:
             rankEnum = Rank(rank)
             requirements = RANK_CONFIG[rankEnum]
         except (ValueError, KeyError):
             return False
 
-        # Check team volume
-        teamVolume = user.teamVolumeTotal or Decimal("0")
-        if teamVolume < requirements["teamVolumeRequired"]:
+        # ✅ FIX: Use qualifying volume with 50% rule from totalVolume JSON
+        if user.totalVolume and isinstance(user.totalVolume, dict):
+            qualifying_volume = Decimal(str(user.totalVolume.get("qualifyingVolume", 0)))
+        else:
+            # Fallback to old field if totalVolume not calculated yet
+            qualifying_volume = user.teamVolumeTotal or Decimal("0")
+            logger.warning(
+                f"User {user.userID} has no totalVolume JSON, "
+                f"using teamVolumeTotal={qualifying_volume} as fallback"
+            )
+
+        required_tv = requirements["teamVolumeRequired"]
+
+        # Check team volume requirement
+        if qualifying_volume < required_tv:
+            logger.debug(
+                f"User {user.userID} not qualified for {rank}: "
+                f"qualifying_volume={qualifying_volume} < required={required_tv}"
+            )
             return False
 
         # Check active partners
         activePartners = await self._countActivePartners(user)
-        if activePartners < requirements["activePartnersRequired"]:
+        required_partners = requirements["activePartnersRequired"]
+
+        if activePartners < required_partners:
+            logger.debug(
+                f"User {user.userID} not qualified for {rank}: "
+                f"active_partners={activePartners} < required={required_partners}"
+            )
             return False
+
+        logger.info(
+            f"User {user.userID} QUALIFIED for {rank}: "
+            f"TV={qualifying_volume} (required={required_tv}), "
+            f"partners={activePartners} (required={required_partners})"
+        )
 
         return True
 
@@ -80,7 +114,14 @@ class RankService:
     async def updateUserRank(self, userId: int, newRank: str, method: str = "natural") -> bool:
         """
         Update user's rank and record in history.
-        Method: 'natural', 'assigned', 'promotion'
+
+        Args:
+            userId: User ID
+            newRank: New rank value
+            method: How rank was achieved - "natural", "assigned", "founder"
+
+        Returns:
+            True if rank updated successfully
         """
         user = self.session.query(User).filter_by(userID=userId).first()
         if not user:
@@ -88,26 +129,37 @@ class RankService:
 
         oldRank = user.rank
 
+        # Don't downgrade ranks (ranks are preserved once achieved)
+        if self._compareRanks(newRank, oldRank) <= 0:
+            logger.info(f"User {userId} already has rank {oldRank}, skipping update to {newRank}")
+            return False
+
         # Update rank
         user.rank = newRank
 
-        # Update MLM status
+        # Record in history
+        history = RankHistory(
+            userID=userId,
+            oldRank=oldRank,
+            newRank=newRank,
+            qualificationMethod=method,
+            qualifiedAt=timeMachine.now,
+            month=timeMachine.currentMonth
+        )
+        self.session.add(history)
+
+        # Update mlmStatus
         if not user.mlmStatus:
             user.mlmStatus = {}
         user.mlmStatus["rankQualifiedAt"] = timeMachine.now.isoformat()
 
-        # Create history record
-        history = RankHistory(
-            userID=userId,
-            previousRank=oldRank,
-            newRank=newRank,
-            teamVolume=user.teamVolumeTotal,
-            activePartners=await self._countActivePartners(user),
-            qualificationMethod=method
-        )
-        self.session.add(history)
+        self.session.commit()
 
-        logger.info(f"User {userId} rank updated: {oldRank} -> {newRank} ({method})")
+        logger.info(
+            f"User {userId} rank updated: {oldRank} → {newRank} "
+            f"(method: {method})"
+        )
+
         return True
 
     async def assignRankByFounder(
@@ -116,120 +168,80 @@ class RankService:
             newRank: str,
             founderId: int
     ) -> bool:
-        """Assign rank manually by founder."""
-        user = self.session.query(User).filter_by(userID=userId).first()
+        """
+        Assign rank to user by founder.
+        Only founders can assign ranks.
+        """
+        # Check if assigner is a founder
         founder = self.session.query(User).filter_by(userID=founderId).first()
-
-        if not user or not founder:
+        if not founder or not founder.mlmStatus.get("isFounder", False):
+            logger.error(f"User {founderId} is not a founder, cannot assign ranks")
             return False
 
-        # Check if assigner is founder
-        if not founder.mlmStatus or not founder.mlmStatus.get("isFounder", False):
-            logger.error(f"User {founderId} is not a founder")
+        # Get target user
+        user = self.session.query(User).filter_by(userID=userId).first()
+        if not user:
+            logger.error(f"User {userId} not found")
             return False
 
-        # Update rank
+        # Assign rank
         user.rank = newRank
-        user.assignedRank = newRank
 
         if not user.mlmStatus:
             user.mlmStatus = {}
         user.mlmStatus["assignedRank"] = newRank
-        user.mlmStatus["rankQualifiedAt"] = timeMachine.now.isoformat()
+        user.mlmStatus["assignedBy"] = founderId
+        user.mlmStatus["assignedAt"] = timeMachine.now.isoformat()
 
-        # Create history record
+        # Record in history
         history = RankHistory(
             userID=userId,
-            previousRank=user.rank,
+            oldRank=user.rank,
             newRank=newRank,
-            teamVolume=user.teamVolumeTotal,
-            activePartners=await self._countActivePartners(user),
             qualificationMethod="assigned",
-            assignedBy=founderId
+            qualifiedAt=timeMachine.now,
+            month=timeMachine.currentMonth,
+            notes=f"Assigned by founder {founderId}"
         )
         self.session.add(history)
+
+        self.session.commit()
 
         logger.info(f"Rank {newRank} assigned to user {userId} by founder {founderId}")
         return True
 
     async def getUserActiveRank(self, userId: int) -> str:
-        """Get user's active rank (considering activity status)."""
+        """
+        Get user's currently active rank.
+        Assigned ranks take priority, but must still be maintained monthly.
+        """
         user = self.session.query(User).filter_by(userID=userId).first()
         if not user:
             return "start"
 
-        # If user is not active, they can't use their rank
-        if not user.isActive:
-            return "start"
+        # Check if user has assigned rank
+        if user.mlmStatus and user.mlmStatus.get("assignedRank"):
+            assignedRank = user.mlmStatus["assignedRank"]
 
-        # If rank was assigned, use it regardless of qualifications
-        if user.assignedRank:
-            return user.assignedRank
+            # Verify if user still qualifies for assigned rank
+            if await self._isQualifiedForRank(user, assignedRank):
+                return assignedRank
+            else:
+                logger.warning(
+                    f"User {userId} has assigned rank {assignedRank} "
+                    f"but doesn't qualify anymore"
+                )
+                # Fall through to natural rank
 
+        # Return natural rank
         return user.rank or "start"
-
-    async def updateMonthlyActivity(self, userId: int) -> bool:
-        """Update user's monthly activity status."""
-        user = self.session.query(User).filter_by(userID=userId).first()
-        if not user:
-            return False
-
-        # Check monthly PV
-        monthlyPV = Decimal("0")
-        if user.mlmVolumes:
-            monthlyPV = Decimal(user.mlmVolumes.get("monthlyPV", "0"))
-
-        # Update activity status
-        isActive = monthlyPV >= Decimal("200")
-        user.isActive = isActive
-
-        if user.mlmStatus:
-            user.mlmStatus["lastActiveMonth"] = timeMachine.currentMonth if isActive else None
-
-        logger.info(f"User {userId} activity updated: {isActive} (PV: {monthlyPV})")
-        return True
-
-    async def checkAllRanks(self) -> Dict[str, int]:
-        """Check and update ranks for all users."""
-        results = {
-            "checked": 0,
-            "updated": 0,
-            "errors": 0
-        }
-
-        users = self.session.query(User).all()
-
-        for user in users:
-            try:
-                results["checked"] += 1
-
-                # Check for new rank qualification
-                newRank = await self.checkRankQualification(user.userID)
-                if newRank:
-                    success = await self.updateUserRank(
-                        user.userID,
-                        newRank,
-                        "natural"
-                    )
-                    if success:
-                        results["updated"] += 1
-            except Exception as e:
-                logger.error(f"Error checking rank for user {user.userID}: {e}")
-                results["errors"] += 1
-
-        self.session.commit()
-
-        logger.info(
-            f"Rank check complete: checked={results['checked']}, "
-            f"updated={results['updated']}, errors={results['errors']}"
-        )
-
-        return results
 
     def _compareRanks(self, rank1: str, rank2: str) -> int:
         """
         Compare two ranks.
-        Returns: -1 if rank1 < rank2, 0 if equal, 1 if rank1 > rank2
+
+        Returns:
+            -1 if rank1 < rank2, 0 if equal, 1 if rank1 > rank2
         """
         rankOrder = {
             "start": 0,
@@ -272,6 +284,12 @@ class RankService:
         if user.mlmVolumes:
             monthlyPV = Decimal(user.mlmVolumes.get("monthlyPV", "0"))
 
+        # Get qualifying volume with 50% rule
+        if user.totalVolume and isinstance(user.totalVolume, dict):
+            qualifying_tv = Decimal(str(user.totalVolume.get("qualifyingVolume", 0)))
+        else:
+            qualifying_tv = user.teamVolumeTotal or Decimal("0")
+
         # Get commission sum for the month
         commissionsEarned = self.session.query(
             func.sum(Bonus.bonusAmount)
@@ -285,7 +303,7 @@ class RankService:
             userID=userId,
             month=currentMonth,
             personalVolume=monthlyPV,
-            teamVolume=user.teamVolumeTotal or Decimal("0"),
+            teamVolume=qualifying_tv,  # ✅ FIX: Use qualifying volume
             activePartnersCount=await self._countActivePartners(user),
             directReferralsCount=self.session.query(func.count(User.userID)).filter(
                 User.upline == user.telegramID
