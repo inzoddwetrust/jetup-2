@@ -200,40 +200,29 @@ class CommissionService:
             purchase: Purchase
     ) -> List[Dict]:
         """Apply Pioneer Bonus (+4%) for qualified users."""
-        result = []
+        pioneeredCommissions = []
 
         for commission in commissions:
-            result.append(commission)
-
-            # Skip if inactive or system root
-            if not commission["isActive"] or commission.get("isSystemRoot"):
-                continue
-
             user = self.session.query(User).filter_by(
-                userId=commission["userID"]
+                userID=commission["userId"]  # ✅ FIX: Changed from "userID" to "userId"
             ).first()
 
-            if not user:
-                continue
+            if user and user.mlmStatus:
+                hasPioneerBonus = user.mlmStatus.get("hasPioneerBonus", False)
 
-            # Check if user is qualified for Pioneer Bonus
-            if user.mlmStatus and user.mlmStatus.get("pioneerBonusQualified", False):
-                pioneer_amount = Decimal(str(purchase.packPrice)) * PIONEER_BONUS_PERCENTAGE
+                if hasPioneerBonus:
+                    # Add 4% bonus
+                    pioneerAmount = Decimal(str(purchase.packPrice)) * PIONEER_BONUS_PERCENTAGE
+                    commission["pioneerBonus"] = pioneerAmount
+                    commission["amount"] += pioneerAmount
 
-                result.append({
-                    "userID": user.userID,
-                    "percentage": PIONEER_BONUS_PERCENTAGE,
-                    "amount": pioneer_amount,
-                    "level": commission["level"],
-                    "rank": user.rank,
-                    "isActive": True,
-                    "compressed": False,
-                    "isPioneerBonus": True
-                })
+                    logger.info(
+                        f"Pioneer bonus {pioneerAmount} added for user {user.userID}"
+                    )
 
-                logger.info(f"Pioneer bonus: ${pioneer_amount} for user {user.userID}")
+            pioneeredCommissions.append(commission)
 
-        return result
+        return pioneeredCommissions
 
     async def processReferralBonus(self, purchase: Purchase) -> Optional[Dict]:
         """Process Referral Bonus (1% for ≥5000$ purchases)."""
@@ -388,7 +377,7 @@ class CommissionService:
         """Get commission percentage for user's rank."""
         try:
             rank_enum = Rank(user.rank.lower())
-            return RANK_CONFIG[rank_enum]["percentage"]
+            return RANK_CONFIG()[rank_enum]["percentage"]  # ✅ CHANGED: Added ()
         except (ValueError, KeyError):
             logger.warning(f"Invalid rank '{user.rank}' for user {user.userID}, using START")
-            return RANK_CONFIG[Rank.START]["percentage"]
+            return RANK_CONFIG()[Rank.START]["percentage"]  # ✅ CHANGED: Added ()

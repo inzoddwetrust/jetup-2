@@ -57,7 +57,7 @@ class RankService:
         """
         try:
             rankEnum = Rank(rank)
-            requirements = RANK_CONFIG[rankEnum]
+            requirements = RANK_CONFIG()[rankEnum]  # ✅ CHANGED: Added ()
         except (ValueError, KeyError):
             return False
 
@@ -239,27 +239,40 @@ class RankService:
     def _compareRanks(self, rank1: str, rank2: str) -> int:
         """
         Compare two ranks.
-
-        Returns:
-            -1 if rank1 < rank2, 0 if equal, 1 if rank1 > rank2
+        Returns: -1 if rank1 < rank2, 0 if equal, 1 if rank1 > rank2
         """
-        rankOrder = {
-            "start": 0,
-            "builder": 1,
-            "growth": 2,
-            "leadership": 3,
-            "director": 4
-        }
+        rank_config = RANK_CONFIG()  # ✅ CHANGED: Added ()
 
-        value1 = rankOrder.get(rank1, 0)
-        value2 = rankOrder.get(rank2, 0)
+        # Get team volume requirements for comparison
+        try:
+            tv1 = rank_config[Rank(rank1)]["teamVolumeRequired"]
+            tv2 = rank_config[Rank(rank2)]["teamVolumeRequired"]
 
-        if value1 < value2:
-            return -1
-        elif value1 > value2:
-            return 1
-        else:
-            return 0
+            if tv1 < tv2:
+                return -1
+            elif tv1 > tv2:
+                return 1
+            else:
+                return 0
+        except (ValueError, KeyError):
+            # Fallback to old hardcoded order
+            rankOrder = {
+                "start": 0,
+                "builder": 1,
+                "growth": 2,
+                "leadership": 3,
+                "director": 4
+            }
+
+            value1 = rankOrder.get(rank1, 0)
+            value2 = rankOrder.get(rank2, 0)
+
+            if value1 < value2:
+                return -1
+            elif value1 > value2:
+                return 1
+            else:
+                return 0
 
     async def saveMonthlyStats(self, userId: int) -> bool:
         """Save monthly statistics snapshot for user."""

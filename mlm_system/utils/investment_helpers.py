@@ -18,13 +18,21 @@ def get_bonus_tiers() -> Dict[Decimal, Decimal]:
     Returns:
         Dict with tier amounts and percentages
     """
-    tiers = Config.get(Config.INVESTMENT_BONUS_TIERS, {})
+    raw_tiers = Config.get(Config.INVESTMENT_BONUS_TIERS, {})
 
-    if not tiers:
+    if not raw_tiers:
         logger.warning("No investment bonus tiers configured")
         return {}
 
-    return tiers
+    converted_tiers = {}
+    for amount_str, percentage in raw_tiers.items():
+        try:
+            converted_tiers[Decimal(str(amount_str))] = Decimal(str(percentage))
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid tier configuration: {amount_str}={percentage}, error: {e}")
+            continue
+
+    return converted_tiers
 
 
 def get_sorted_tiers() -> List[Decimal]:

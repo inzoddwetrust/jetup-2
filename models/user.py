@@ -14,10 +14,9 @@ class User(Base):
     # Primary identification
     userID = Column(Integer, primary_key=True, autoincrement=True)
     telegramID = Column(BigInteger, unique=True, nullable=False)
-    upline = Column(BigInteger, nullable=True)  # TelegramID спонсора
+    upline = Column(BigInteger, nullable=True)
     createdAt = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    # Personal information (остаются как отдельные поля для быстрого доступа)
     email = Column(String, nullable=True)
     firstname = Column(String, nullable=True)
     surname = Column(String, nullable=True)
@@ -29,7 +28,7 @@ class User(Base):
     passport = Column(String, nullable=True)
 
     # System fields
-    lang = Column(String, default="en")  # Язык остается отдельным полем
+    lang = Column(String, default="en")
     status = Column(String, default="active")  # active, blocked, deleted
     lastActive = Column(DateTime, nullable=True)
 
@@ -66,7 +65,6 @@ class User(Base):
     #     "calculatedAt": "2025-01-15T10:30:00Z"
     # }
 
-    # DEPRECATED (keep for now, will remove later):
     teamVolumeTotal = Column(DECIMAL(12, 2), default=0.0)
 
     # Personal Volume (накопительный)
@@ -122,7 +120,7 @@ class User(Base):
     # }
 
     notes = Column(Text, nullable=True)  # Только для админских заметок
-    stateFSM = Column(String, nullable=True)  # FSM state (оставляем для совместимости)
+    stateFSM = Column(String, nullable=True)
 
     # Class methods
     @classmethod

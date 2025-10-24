@@ -70,6 +70,8 @@ class Config:
     DEFAULT_REFERRER_ID = "DEFAULT_REFERRER_ID"
     STRATEGY_COEFFICIENTS = "STRATEGY_COEFFICIENTS"
     INVESTMENT_BONUS_TIERS = "INVESTMENT_BONUS_TIERS"
+    RANK_CONFIG = "RANK_CONFIG"
+    INVESTMENT_BONUS_TIERS = "INVESTMENT_BONUS_TIERS"
 
     # Payment & Wallets
     WALLET_TRC = "WALLET_TRC"
@@ -383,6 +385,14 @@ class Config:
             if 'STRATEGY_COEFFICIENTS' in config_dict:
                 cls.set(cls.STRATEGY_COEFFICIENTS, config_dict['STRATEGY_COEFFICIENTS'], source="sheets")
                 updates.append(f"STRATEGY_COEFFICIENTS: loaded")
+
+            if 'RANK_CONFIG' in config_dict:
+                cls.set(cls.RANK_CONFIG, config_dict['RANK_CONFIG'], source="sheets")
+                updates.append(f"RANK_CONFIG: {len(config_dict['RANK_CONFIG'])} ranks")
+
+            if 'INVESTMENT_BONUS_TIERS' in config_dict:
+                cls.set(cls.INVESTMENT_BONUS_TIERS, config_dict['INVESTMENT_BONUS_TIERS'], source="sheets")
+                updates.append(f"INVESTMENT_BONUS_TIERS: {len(config_dict['INVESTMENT_BONUS_TIERS'])} tiers")
 
             if 'FAQ_URL' in config_dict:
                 cls.set(cls.FAQ_URL, config_dict['FAQ_URL'], source="sheets")

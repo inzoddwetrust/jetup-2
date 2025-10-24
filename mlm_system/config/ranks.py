@@ -1,12 +1,18 @@
-# bot/mlm_system/config/ranks.py
+# mlm_system/config/ranks.py
 """
 MLM ranks configuration and constants.
+Loads from Google Sheets via Config module.
 """
 from enum import Enum
 from decimal import Decimal
+from typing import Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Rank(Enum):
+    """MLM rank enumeration."""
     START = "start"
     BUILDER = "builder"
     GROWTH = "growth"
@@ -14,46 +20,78 @@ class Rank(Enum):
     DIRECTOR = "director"
 
 
-RANK_CONFIG = {
-    Rank.START: {
-        "percentage": Decimal("0.04"),  # 4%
-        "teamVolumeRequired": Decimal("0"),
-        "activePartnersRequired": 0,
-        "displayName": "Старт"
-    },
-    Rank.BUILDER: {
-        "percentage": Decimal("0.08"),  # 8%
-        "teamVolumeRequired": Decimal("50000"),
-        "activePartnersRequired": 2,
-        "displayName": "Строитель"
-    },
-    Rank.GROWTH: {
-        "percentage": Decimal("0.12"),  # 12%
-        "teamVolumeRequired": Decimal("250000"),
-        "activePartnersRequired": 5,
-        "displayName": "Рост"
-    },
-    Rank.LEADERSHIP: {
-        "percentage": Decimal("0.15"),  # 15%
-        "teamVolumeRequired": Decimal("1000000"),
-        "activePartnersRequired": 10,
-        "displayName": "Лидерство"
-    },
-    Rank.DIRECTOR: {
-        "percentage": Decimal("0.18"),  # 18%
-        "teamVolumeRequired": Decimal("5000000"),
-        "activePartnersRequired": 15,
-        "displayName": "Директор"
-    }
-}
+def get_rank_config() -> Dict[Rank, Dict[str, Any]]:
+    """
+    Get rank configuration from Config module.
 
-# Constants
-MINIMUM_PV = Decimal("200")  # Минимальный PV для активации
-PIONEER_BONUS_PERCENTAGE = Decimal("0.04")  # +4% для первых 50
-REFERRAL_BONUS_PERCENTAGE = Decimal("0.01")  # 1% за привлечение
-GLOBAL_POOL_PERCENTAGE = Decimal("0.02")  # 2% от оборота
-TRANSFER_BONUS_PERCENTAGE = Decimal("0.02")  # 2% бонус при переводе с passive
+    Returns:
+        Dictionary mapping Rank enum to configuration dict
 
-# Thresholds
-PIONEER_MAX_COUNT = 50  # Первые 50 покупок в структуре
-REFERRAL_BONUS_MIN_AMOUNT = Decimal("5000")  # Минимум для referral bonus
+    Raises:
+        ValueError: If RANK_CONFIG not loaded
+    """
+    from config import Config
+
+    raw_config = Config.get(Config.RANK_CONFIG)
+
+    if not raw_config:
+        logger.error("RANK_CONFIG not loaded from Google Sheets!")
+        raise ValueError("RANK_CONFIG must be loaded from Google Sheets before use")
+
+    # Convert string keys to Rank enum and values to Decimal
+    rank_config = {}
+
+    for rank_key, rank_data in raw_config.items():
+        try:
+            rank_enum = Rank(rank_key)
+
+            # Convert numeric values to Decimal
+            rank_config[rank_enum] = {
+                "percentage": Decimal(str(rank_data["percentage"])) / 100,  # Convert % to decimal
+                "teamVolumeRequired": Decimal(str(rank_data["teamVolumeRequired"])),
+                "activePartnersRequired": int(rank_data["activePartnersRequired"]),
+                "displayName": rank_data["displayName"]
+            }
+
+        except (ValueError, KeyError) as e:
+            logger.error(f"Invalid rank configuration for '{rank_key}': {e}")
+            continue
+
+    return rank_config
+
+
+# Lazy-loaded configuration cache
+_RANK_CONFIG_CACHE: Dict[Rank, Dict[str, Any]] = {}
+
+
+def get_rank_config_cached() -> Dict[Rank, Dict[str, Any]]:
+    """
+    Get rank configuration with caching.
+    Loads from Config on first access, then returns cached version.
+
+    Returns:
+        Rank configuration dictionary
+    """
+    global _RANK_CONFIG_CACHE
+
+    if not _RANK_CONFIG_CACHE:
+        _RANK_CONFIG_CACHE = get_rank_config()
+        logger.info(f"Loaded RANK_CONFIG: {len(_RANK_CONFIG_CACHE)} ranks")
+
+    return _RANK_CONFIG_CACHE
+
+
+# Public accessor - use this everywhere instead of RANK_CONFIG constant
+def RANK_CONFIG():
+    """Get current rank configuration."""
+    return get_rank_config_cached()
+
+
+# Constants (these can stay hardcoded as they don't change)
+MINIMUM_PV = Decimal("200")
+PIONEER_BONUS_PERCENTAGE = Decimal("0.04")
+REFERRAL_BONUS_PERCENTAGE = Decimal("0.01")
+GLOBAL_POOL_PERCENTAGE = Decimal("0.02")
+TRANSFER_BONUS_PERCENTAGE = Decimal("0.02")
+PIONEER_MAX_COUNT = 50
+REFERRAL_BONUS_MIN_AMOUNT = Decimal("5000")
