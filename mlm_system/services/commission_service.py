@@ -201,7 +201,10 @@ class CommissionService:
             purchase: Purchase
     ) -> List[Dict]:
         """
-        Apply Pioneer Bonus (+4%) for first 50 purchases in sponsor's structure.
+        Apply Pioneer Bonus (+4%) for users with pioneer status.
+
+        Pioneer status is granted globally to first 50 customers with ≥5000$ investment.
+        This is a PERMANENT bonus that applies to ALL their future commissions.
         """
         pioneeredCommissions = []
 
@@ -214,24 +217,16 @@ class CommissionService:
                 pioneeredCommissions.append(commission)
                 continue
 
-            # ✅ FIX: Check pioneer purchase count in user's structure
-            mlm_status = user.mlmStatus or {}
-            pioneer_count = mlm_status.get("pioneerPurchasesCount", 0)
-
-            # First 50 purchases in this user's structure get pioneer bonus
-            if pioneer_count < PIONEER_MAX_COUNT:
+            # Check if user has pioneer status
+            if user.mlmStatus and user.mlmStatus.get("hasPioneerBonus", False):
                 # Add 4% bonus
                 pioneer_amount = Decimal(str(purchase.packPrice)) * PIONEER_BONUS_PERCENTAGE
                 commission["pioneerBonus"] = pioneer_amount
                 commission["amount"] += pioneer_amount
 
-                # ✅ Increment pioneer counter
-                mlm_status["pioneerPurchasesCount"] = pioneer_count + 1
-                user.mlmStatus = mlm_status
-
                 logger.info(
-                    f"Pioneer bonus {pioneer_amount} added for user {user.userID} "
-                    f"(purchase {pioneer_count + 1}/{PIONEER_MAX_COUNT})"
+                    f"Pioneer bonus +${pioneer_amount} applied for user {user.userID} "
+                    f"on purchase {purchase.purchaseID}"
                 )
 
             pioneeredCommissions.append(commission)

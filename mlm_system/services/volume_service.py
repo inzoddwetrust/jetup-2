@@ -185,15 +185,19 @@ class VolumeService:
             count: int = 2
     ) -> List[Dict]:
         """
-        Get top N branches by volume for a user.
+        Get top N branches with Directors for a user.
         Used by Global Pool service.
+
+        CRITICAL: Must prioritize branches WITH Directors over volume!
 
         Args:
             userId: User ID
             count: Number of top branches to return
 
         Returns:
-            List of branches sorted by volume
+            List of branches sorted by:
+            1. Has Director (priority)
+            2. Volume (secondary)
         """
         user = self.session.query(User).filter_by(userID=userId).first()
         if not user:
@@ -210,15 +214,29 @@ class VolumeService:
             ).first()
 
             if referral:
+                has_director = await self._checkForDirectorInBranch(referral)
+
                 branches.append({
                     "rootUser": referral,
                     "rootUserId": referral.userID,
                     "volume": branch["fullVolume"],
-                    "hasDirector": await self._checkForDirectorInBranch(referral)
+                    "hasDirector": has_director
                 })
 
-        # Sort by volume and return top N
-        branches.sort(key=lambda x: x["volume"], reverse=True)
+        # ✅ FIX: Sort by hasDirector FIRST, then by volume
+        # This ensures branches with Directors are prioritized
+        branches.sort(key=lambda x: (not x["hasDirector"], -x["volume"]))
+
+        # Log for debugging
+        if len(branches) >= count:
+            selected = branches[:count]
+            directors_count = sum(1 for b in selected if b["hasDirector"])
+            logger.info(
+                f"Selected {count} branches for user {userId}: "
+                f"{directors_count} with Directors, "
+                f"volumes: {[float(b['volume']) for b in selected]}"
+            )
+
         return branches[:count]
 
     async def resetMonthlyVolumes(self):
