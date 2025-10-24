@@ -16,7 +16,8 @@ from mlm_system.config.ranks import (
     Rank,
     PIONEER_BONUS_PERCENTAGE,
     REFERRAL_BONUS_PERCENTAGE,
-    REFERRAL_BONUS_MIN_AMOUNT
+    REFERRAL_BONUS_MIN_AMOUNT,
+    PIONEER_MAX_COUNT
 )
 
 logger = logging.getLogger(__name__)
@@ -199,26 +200,39 @@ class CommissionService:
             commissions: List[Dict],
             purchase: Purchase
     ) -> List[Dict]:
-        """Apply Pioneer Bonus (+4%) for qualified users."""
+        """
+        Apply Pioneer Bonus (+4%) for first 50 purchases in sponsor's structure.
+        """
         pioneeredCommissions = []
 
         for commission in commissions:
             user = self.session.query(User).filter_by(
-                userID=commission["userId"]  # ✅ FIX: Changed from "userID" to "userId"
+                userID=commission["userId"]
             ).first()
 
-            if user and user.mlmStatus:
-                hasPioneerBonus = user.mlmStatus.get("hasPioneerBonus", False)
+            if not user:
+                pioneeredCommissions.append(commission)
+                continue
 
-                if hasPioneerBonus:
-                    # Add 4% bonus
-                    pioneerAmount = Decimal(str(purchase.packPrice)) * PIONEER_BONUS_PERCENTAGE
-                    commission["pioneerBonus"] = pioneerAmount
-                    commission["amount"] += pioneerAmount
+            # ✅ FIX: Check pioneer purchase count in user's structure
+            mlm_status = user.mlmStatus or {}
+            pioneer_count = mlm_status.get("pioneerPurchasesCount", 0)
 
-                    logger.info(
-                        f"Pioneer bonus {pioneerAmount} added for user {user.userID}"
-                    )
+            # First 50 purchases in this user's structure get pioneer bonus
+            if pioneer_count < PIONEER_MAX_COUNT:
+                # Add 4% bonus
+                pioneer_amount = Decimal(str(purchase.packPrice)) * PIONEER_BONUS_PERCENTAGE
+                commission["pioneerBonus"] = pioneer_amount
+                commission["amount"] += pioneer_amount
+
+                # ✅ Increment pioneer counter
+                mlm_status["pioneerPurchasesCount"] = pioneer_count + 1
+                user.mlmStatus = mlm_status
+
+                logger.info(
+                    f"Pioneer bonus {pioneer_amount} added for user {user.userID} "
+                    f"(purchase {pioneer_count + 1}/{PIONEER_MAX_COUNT})"
+                )
 
             pioneeredCommissions.append(commission)
 

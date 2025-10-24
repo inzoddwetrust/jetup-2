@@ -230,7 +230,7 @@ class VolumeService:
 
         for user in allUsers:
             if user.mlmVolumes:
-                user.mlmVolumes["monthlyPV"] = "0"
+                user.mlmVolumes["monthlyPV"] = 0.0
 
             # Reset monthly activity
             user.isActive = False
@@ -381,7 +381,7 @@ class VolumeService:
         if not user.mlmVolumes:
             user.mlmVolumes = {}
 
-        user.mlmVolumes["personalTotal"] = str(user.personalVolumeTotal)
+        user.mlmVolumes["personalTotal"] = float(user.personalVolumeTotal)
         user.mlmVolumes["monthlyPV"] = str(
             Decimal(user.mlmVolumes.get("monthlyPV", "0")) + amount
         )
