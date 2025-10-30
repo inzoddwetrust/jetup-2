@@ -259,20 +259,17 @@ async def _check_pioneer_bonus_eligibility(session, purchase: Purchase) -> bool:
 async def _send_pioneer_bonus_notification(session, purchase: Purchase):
     """
     Send notification to user about Pioneer Bonus status.
-
-    Args:
-        session: Database session
-        purchase: Purchase that triggered Pioneer status
+    Uses Notification model for queued delivery.
     """
-    from core.di import get_service
-    from core.message_manager import MessageManager
+    from models.notification import Notification
+    from core.templates import MessageTemplates
     from config import Config
     from mlm_system.config.ranks import PIONEER_MAX_COUNT
 
     try:
         user = purchase.user
 
-        # Get current pioneer count
+        # Get pioneer count
         default_referrer_id = Config.get(Config.DEFAULT_REFERRER_ID)
         root_user = session.query(User).filter_by(
             telegramID=default_referrer_id
@@ -282,31 +279,39 @@ async def _send_pioneer_bonus_notification(session, purchase: Purchase):
         if root_user and root_user.mlmStatus:
             pioneer_number = root_user.mlmStatus.get("pioneerPurchasesCount", 0)
 
-        # Get message manager from DI
-        message_manager = get_service(MessageManager)
-
-        if not message_manager:
-            logger.warning("MessageManager not available for Pioneer notification")
-            return
-
-        # Send notification
-        await message_manager.send_template(
-            user=user,
-            template_key='/mlm/pioneer_bonus_granted',
-            variables={
+        # Get template
+        text, buttons = await MessageTemplates.get_raw_template(
+            '/mlm/pioneer_bonus_granted',
+            {
                 'purchase_amount': float(purchase.packPrice),
-                'project_name': purchase.projectName,
+                'project_name': purchase.projectName or "JetUp",
                 'pioneer_number': pioneer_number,
                 'pioneer_max': PIONEER_MAX_COUNT,
-                'bonus_percentage': 4.0  # 4%
-            }
+                'bonus_percentage': 4.0
+            },
+            lang=user.lang or 'en'
         )
 
-        logger.info(f"Pioneer bonus notification sent to user {user.userID}")
+        # Create notification
+        notification = Notification(
+            source="mlm_system",
+            text=text,
+            buttons=buttons,
+            target_type="user",
+            target_value=str(user.userID),
+            priority=2,
+            category="mlm",
+            importance="high",
+            parse_mode="HTML"
+        )
+
+        session.add(notification)
+        session.commit()
+
+        logger.info(f"Pioneer bonus notification queued for user {user.userID}")
 
     except Exception as e:
-        logger.error(f"Failed to send pioneer bonus notification: {e}", exc_info=True)
-        # Don't raise - notification failure shouldn't break the flow
+        logger.error(f"Failed to create pioneer bonus notification: {e}", exc_info=True)
 
 
 async def _send_investment_bonus_notification(
@@ -316,24 +321,17 @@ async def _send_investment_bonus_notification(
 ):
     """
     Send notification to user about investment bonus.
-
-    This is a "silent" notification - just informing about the gift.
-    Does NOT trigger any further MLM processing.
-
-    Args:
-        session: Database session
-        purchase: Original purchase that triggered bonus
-        bonus_amount: Bonus amount granted
+    Uses Notification model for queued delivery.
     """
-    from core.di import get_service
-    from core.message_manager import MessageManager
+    from models.notification import Notification
+    from core.templates import MessageTemplates
     from mlm_system.utils.investment_helpers import get_tier_info
     from mlm_system.services.investment_bonus_service import InvestmentBonusService
 
     try:
         user = purchase.user
 
-        # Get tier information for display
+        # Get tier information
         bonus_service = InvestmentBonusService(session)
         total_purchased = await bonus_service._calculateTotalPurchased(
             user.userID,
@@ -341,29 +339,50 @@ async def _send_investment_bonus_notification(
         )
         tier_info = get_tier_info(total_purchased)
 
-        # Get message manager from DI
-        message_manager = get_service(MessageManager)
+        # Format next tier info
+        next_tier_vars = {}
+        if tier_info.get('next_tier'):
+            next_tier = tier_info['next_tier']
+            next_tier_vars = {
+                'has_next_tier': True,
+                'next_threshold': next_tier['threshold'],
+                'next_percentage': next_tier['bonus_percentage'],
+                'amount_needed': next_tier['amount_needed']
+            }
+        else:
+            next_tier_vars = {'has_next_tier': False}
 
-        if not message_manager:
-            logger.warning("MessageManager not available for investment bonus notification")
-            return
-
-        # Send notification
-        await message_manager.send_template(
-            user=user,
-            template_key='/investment/bonus_granted',
-            variables={
+        # Get template
+        text, buttons = await MessageTemplates.get_raw_template(
+            '/investment/bonus_granted',
+            {
                 'bonus_amount': float(bonus_amount),
-                'project_name': purchase.projectName,
+                'project_name': purchase.projectName or "JetUp",
                 'total_purchased': float(total_purchased),
                 'tier_percentage': tier_info['current_tier']['bonus_percentage'],
                 'total_bonus': tier_info['current_tier']['total_bonus'],
-                'next_tier': tier_info.get('next_tier')
-            }
+                **next_tier_vars
+            },
+            lang=user.lang or 'en'
         )
 
-        logger.info(f"Investment bonus notification sent to user {user.userID}")
+        # Create notification
+        notification = Notification(
+            source="mlm_system",
+            text=text,
+            buttons=buttons,
+            target_type="user",
+            target_value=str(user.userID),
+            priority=2,
+            category="mlm",
+            importance="high",
+            parse_mode="HTML"
+        )
+
+        session.add(notification)
+        session.commit()
+
+        logger.info(f"Investment bonus notification queued for user {user.userID}")
 
     except Exception as e:
-        logger.error(f"Failed to send investment bonus notification: {e}", exc_info=True)
-        # Don't raise - notification failure shouldn't break the flow
+        logger.error(f"Failed to create investment bonus notification: {e}", exc_info=True)

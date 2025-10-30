@@ -279,7 +279,9 @@ async def show_dashboard(
 
         # Get rank display name
         try:
-            rank_display = RANK_CONFIG.get(Rank(active_rank), {}).get("displayName", active_rank)
+            rank_enum = Rank(active_rank)
+            rank_config = RANK_CONFIG()
+            rank_display = rank_config.get(rank_enum, {}).get("displayName", active_rank)
         except (ValueError, KeyError):
             rank_display = active_rank
 
