@@ -13,6 +13,7 @@ from models.user import User
 from models.purchase import Purchase
 from models.bonus import Bonus
 from models.option import Option
+from models.active_balance import ActiveBalance
 from mlm_system.utils.time_machine import timeMachine
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,13 @@ class GraceDayService:
         - Only applies if purchase made on 1st of month (Grace Day)
         - Grants +5% bonus in OPTIONS (not money)
         - Updates loyalty streak counter
-        - Creates Bonus record for tracking
+        - Creates Bonus record + ActiveBalance transactions + auto-Purchase
+
+        Transaction flow:
+        1. Create Bonus record (tracking)
+        2. ActiveBalance (+bonus_amount) - credit
+        3. Create Purchase (auto-purchase options)
+        4. ActiveBalance (-bonus_amount) - debit
 
         Args:
             purchase: Purchase object
@@ -77,7 +84,6 @@ class GraceDayService:
             return None
 
         # Calculate bonus options quantity
-        # Use same price per option as original purchase
         price_per_option = Decimal(str(option.packPrice)) / Decimal(str(option.packQty))
         bonus_qty = int(bonus_amount / price_per_option)
 
@@ -88,7 +94,56 @@ class GraceDayService:
             )
             return None
 
-        # Create Bonus record
+        # ═══════════════════════════════════════════════════════════
+        # STEP 1: Create Bonus record (tracking only)
+        # ═══════════════════════════════════════════════════════════
+        bonus = await self._createBonusRecord(user, purchase, bonus_amount, bonus_qty)
+
+        # ═══════════════════════════════════════════════════════════
+        # STEP 2: Create auto-purchase (ActiveBalance + Purchase)
+        # ═══════════════════════════════════════════════════════════
+        await self._createAutoPurchase(user, purchase, bonus_amount, bonus_qty, bonus.bonusID)
+
+        # ═══════════════════════════════════════════════════════════
+        # STEP 3: Update loyalty streak counter
+        # ═══════════════════════════════════════════════════════════
+        await self._updateLoyaltyStreak(user)
+
+        self.session.commit()
+
+        logger.info(
+            f"✓ Grace Day bonus completed: ${bonus_amount} "
+            f"({bonus_qty} options) for user {user.userID}"
+        )
+
+        return {
+            "success": True,
+            "bonusID": bonus.bonusID,
+            "bonusAmount": bonus_amount,
+            "bonusQty": bonus_qty,
+            "loyaltyStreak": user.mlmVolumes.get("graceDayStreak", 0) if user.mlmVolumes else 0
+        }
+
+    async def _createBonusRecord(
+            self,
+            user: User,
+            purchase: Purchase,
+            bonus_amount: Decimal,
+            bonus_qty: int
+    ) -> Bonus:
+        """
+        Create Bonus record for tracking.
+        This represents the company's gift to the user.
+
+        Args:
+            user: User receiving bonus
+            purchase: Original purchase that triggered bonus
+            bonus_amount: Amount to grant
+            bonus_qty: Number of options
+
+        Returns:
+            Created Bonus object
+        """
         bonus = Bonus()
         bonus.userID = user.userID
         bonus.downlineID = None  # Not a commission from downline
@@ -118,25 +173,100 @@ class GraceDayService:
         bonus.ownerEmail = user.email
 
         self.session.add(bonus)
-        self.session.flush()
+        self.session.flush()  # Get bonusID
 
-        logger.info(
-            f"✓ Grace Day bonus granted: ${bonus_amount} "
-            f"({bonus_qty} options) for user {user.userID}"
+        logger.debug(f"Created bonus record: bonusID={bonus.bonusID}, amount=${bonus_amount}")
+
+        return bonus
+
+    async def _createAutoPurchase(
+            self,
+            user: User,
+            original_purchase: Purchase,
+            bonus_amount: Decimal,
+            bonus_qty: int,
+            bonus_id: int
+    ):
+        """
+        Create automatic purchase using bonus money.
+
+        Transaction flow:
+        1. ActiveBalance (+bonus_amount) - bonus credit from company
+        2. Create Purchase record - auto-purchase options
+        3. ActiveBalance (-bonus_amount) - debit for purchase
+
+        Net effect on user.balanceActive: 0 (credit and debit cancel out)
+        But user gets OPTIONS added to their portfolio.
+
+        Args:
+            user: User receiving bonus
+            original_purchase: Purchase that triggered the bonus
+            bonus_amount: Bonus amount
+            bonus_qty: Number of options to purchase
+            bonus_id: ID of the Bonus record
+        """
+        logger.debug(
+            f"Creating auto-purchase for user {user.userID}: "
+            f"${bonus_amount}, {bonus_qty} options"
         )
 
-        # Update loyalty streak counter
-        await self._updateLoyaltyStreak(user)
+        # ═══════════════════════════════════════════════════════════
+        # STEP 1: Create Purchase record (auto-purchase)
+        # ═══════════════════════════════════════════════════════════
+        auto_purchase = Purchase()
+        auto_purchase.userID = user.userID
+        auto_purchase.projectID = original_purchase.projectID
+        auto_purchase.optionID = original_purchase.optionID
+        auto_purchase.projectName = original_purchase.projectName
+        auto_purchase.packQty = bonus_qty
+        auto_purchase.packPrice = bonus_amount
 
-        self.session.commit()
+        # AuditMixin fields
+        auto_purchase.ownerTelegramID = user.telegramID
+        auto_purchase.ownerEmail = user.email
 
-        return {
-            "success": True,
-            "bonusID": bonus.bonusID,
-            "bonusAmount": bonus_amount,
-            "bonusQty": bonus_qty,
-            "loyaltyStreak": user.mlmVolumes.get("graceDayStreak", 0) if user.mlmVolumes else 0
-        }
+        self.session.add(auto_purchase)
+        self.session.flush()  # Get purchaseID
+
+        logger.debug(
+            f"Created auto-purchase: purchaseID={auto_purchase.purchaseID}, "
+            f"qty={bonus_qty}, price=${bonus_amount}"
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # STEP 2: Create ActiveBalance transaction records
+        # ═══════════════════════════════════════════════════════════
+
+        # Record 1: Bonus credited (+bonus_amount)
+        bonus_credit = ActiveBalance()
+        bonus_credit.userID = user.userID
+        bonus_credit.firstname = user.firstname
+        bonus_credit.surname = user.surname
+        bonus_credit.amount = bonus_amount
+        bonus_credit.status = 'done'
+        bonus_credit.reason = f'bonus={bonus_id}'
+        bonus_credit.link = ''
+        bonus_credit.notes = 'Grace Day bonus (+5%) - auto-purchase credit'
+
+        self.session.add(bonus_credit)
+
+        # Record 2: Purchase debit (-bonus_amount)
+        purchase_debit = ActiveBalance()
+        purchase_debit.userID = user.userID
+        purchase_debit.firstname = user.firstname
+        purchase_debit.surname = user.surname
+        purchase_debit.amount = -bonus_amount
+        purchase_debit.status = 'done'
+        purchase_debit.reason = f'purchase={auto_purchase.purchaseID}'
+        purchase_debit.link = ''
+        purchase_debit.notes = 'Grace Day bonus (+5%) - auto-purchase debit'
+
+        self.session.add(purchase_debit)
+
+        logger.info(
+            f"✓ Grace Day auto-purchase completed: {bonus_qty} options worth ${bonus_amount} "
+            f"for user {user.userID}"
+        )
 
     async def _updateLoyaltyStreak(self, user: User):
         """

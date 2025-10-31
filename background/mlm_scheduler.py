@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from core.db import get_session
+from core.db import get_db_session_ctx
 from models.user import User
 from models.bonus import Bonus
 from mlm_system.services.volume_service import VolumeService
@@ -124,73 +124,63 @@ class MLMScheduler:
         self.lastQueueCheck = now
 
         # Process queue
-        session = get_session()
         try:
-            volume_service = VolumeService(session)
-            processed = await volume_service.processQueueBatch(batchSize=10)
+            with get_db_session_ctx() as session:
+                volume_service = VolumeService(session)
+                processed = await volume_service.processQueueBatch(batchSize=10)
 
-            if processed > 0:
-                self.stats["volumeQueueProcessed"] += processed
-                self.stats["lastVolumeQueueCheck"] = now.isoformat()
-                logger.info(f"Processed {processed} volume updates from queue")
+                if processed > 0:
+                    self.stats["volumeQueueProcessed"] += processed
+                    self.stats["lastVolumeQueueCheck"] = now
+                    logger.info(f"Processed {processed} volume updates from queue")
 
         except Exception as e:
             logger.error(f"Error processing volume queue: {e}", exc_info=True)
             self.stats["errors"] += 1
-        finally:
-            session.close()
 
     async def executeDailyTasks(self):
         """Execute daily tasks."""
         logger.info(f"Executing daily tasks for {timeMachine.now.date()}")
-        session = get_session()
 
         try:
-            # Update rank qualifications
-            await self.checkRankQualifications(session)
+            with get_db_session_ctx() as session:
+                # Update rank qualifications
+                await self.checkRankQualifications(session)
 
-            # Check Grace Day status
-            await self.processGraceDay(session)
+                # Check Grace Day status
+                await self.processGraceDay(session)
 
-            session.commit()
             self.stats["tasksExecuted"] += 1
-            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc)
 
         except Exception as e:
             logger.error(f"Error in daily tasks: {e}", exc_info=True)
-            session.rollback()
             self.stats["errors"] += 1
             self.stats["lastError"] = str(e)
-        finally:
-            session.close()
 
     async def executeFirstOfMonthTasks(self):
         """Execute tasks on 1st of month."""
         logger.info(f"Executing first-of-month tasks for {timeMachine.currentMonth}")
-        session = get_session()
 
         try:
-            # Reset monthly volumes
-            volumeService = VolumeService(session)
-            await volumeService.resetMonthlyVolumes()
+            with get_db_session_ctx() as session:
+                # Reset monthly volumes
+                volumeService = VolumeService(session)
+                await volumeService.resetMonthlyVolumes()
 
-            # Process Autoship
-            await self.processAutoship(session)
+                # Process Autoship
+                await self.processAutoship(session)
 
-            # Fire event
-            await eventBus.emit(MLMEvents.MONTH_STARTED, {"month": timeMachine.currentMonth})
+                # Fire event
+                await eventBus.emit(MLMEvents.MONTH_STARTED, {"month": timeMachine.currentMonth})
 
-            session.commit()
             self.stats["tasksExecuted"] += 1
-            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc)
 
         except Exception as e:
             logger.error(f"Error in first-of-month tasks: {e}", exc_info=True)
-            session.rollback()
             self.stats["errors"] += 1
             self.stats["lastError"] = str(e)
-        finally:
-            session.close()
 
     async def executeSecondOfMonthTasks(self):
         """
@@ -200,81 +190,69 @@ class MLMScheduler:
         - Reset Grace Day streaks for users who didn't purchase on 1st
         """
         logger.info(f"Executing second-of-month tasks for {timeMachine.currentMonth}")
-        session = get_session()
 
         try:
-            # Import here to avoid circular dependency
-            from mlm_system.services.grace_day_service import GraceDayService
+            with get_db_session_ctx() as session:
+                # Import here to avoid circular dependency
+                from mlm_system.services.grace_day_service import GraceDayService
 
-            # Reset streaks for users who missed Grace Day
-            grace_day_service = GraceDayService(session)
-            reset_result = await grace_day_service.resetMonthlyStreaks()
+                # Reset streaks for users who missed Grace Day
+                grace_day_service = GraceDayService(session)
+                reset_result = await grace_day_service.resetMonthlyStreaks()
 
-            logger.info(
-                f"Grace Day streak reset complete: "
-                f"{reset_result['resetsCount']} users reset"
-            )
+                logger.info(
+                    f"Grace Day streak reset complete: "
+                    f"{reset_result['resetsCount']} users reset"
+                )
 
-            session.commit()
             self.stats["tasksExecuted"] += 1
-            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc)
 
         except Exception as e:
             logger.error(f"Error in second-of-month tasks: {e}", exc_info=True)
-            session.rollback()
             self.stats["errors"] += 1
             self.stats["lastError"] = str(e)
-        finally:
-            session.close()
 
     async def executeThirdOfMonthTasks(self):
         """Execute tasks on 3rd of month."""
         logger.info(f"Executing third-of-month tasks for {timeMachine.currentMonth}")
-        session = get_session()
 
         try:
-            # Calculate Global Pool
-            globalPoolService = GlobalPoolService(session)
-            await globalPoolService.calculateMonthlyPool()
+            with get_db_session_ctx() as session:
+                # Calculate Global Pool
+                globalPoolService = GlobalPoolService(session)
+                await globalPoolService.calculateMonthlyPool()
 
-            # Save monthly statistics
-            await self.saveMonthlyStats(session)
+                # Save monthly statistics
+                await self.saveMonthlyStats(session)
 
-            session.commit()
             self.stats["tasksExecuted"] += 1
-            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc)
 
         except Exception as e:
             logger.error(f"Error in third-of-month tasks: {e}", exc_info=True)
-            session.rollback()
             self.stats["errors"] += 1
             self.stats["lastError"] = str(e)
-        finally:
-            session.close()
 
     async def executeFifthOfMonthTasks(self):
         """Execute tasks on 5th of month."""
         logger.info(f"Executing fifth-of-month tasks for {timeMachine.currentMonth}")
-        session = get_session()
 
         try:
-            # Process monthly payments
-            await self.processMonthlyPayments(session)
+            with get_db_session_ctx() as session:
+                # Process monthly payments
+                await self.processMonthlyPayments(session)
 
-            # Fire event
-            await eventBus.emit(MLMEvents.PAYMENTS_PROCESSED, {"month": timeMachine.currentMonth})
+                # Fire event
+                await eventBus.emit(MLMEvents.PAYMENTS_PROCESSED, {"month": timeMachine.currentMonth})
 
-            session.commit()
             self.stats["tasksExecuted"] += 1
-            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc)
 
         except Exception as e:
             logger.error(f"Error in fifth-of-month tasks: {e}", exc_info=True)
-            session.rollback()
             self.stats["errors"] += 1
             self.stats["lastError"] = str(e)
-        finally:
-            session.close()
 
     async def checkRankQualifications(self, session):
         """Check rank qualifications for all users."""

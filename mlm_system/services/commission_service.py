@@ -10,14 +10,14 @@ import logging
 from models.user import User
 from models.purchase import Purchase
 from models.bonus import Bonus
-from models.passive_balance import PassiveBalance
+from models.active_balance import ActiveBalance
+from models.option import Option
 from mlm_system.config.ranks import (
     RANK_CONFIG,
     Rank,
     PIONEER_BONUS_PERCENTAGE,
     REFERRAL_BONUS_PERCENTAGE,
     REFERRAL_BONUS_MIN_AMOUNT,
-    PIONEER_MAX_COUNT
 )
 
 logger = logging.getLogger(__name__)
@@ -234,7 +234,16 @@ class CommissionService:
         return pioneeredCommissions
 
     async def processReferralBonus(self, purchase: Purchase) -> Optional[Dict]:
-        """Process Referral Bonus (1% for ≥5000$ purchases)."""
+        """
+        Process Referral Bonus (1% for ≥5000$ purchases).
+
+        Grants bonus in OPTIONS (not money).
+        Transaction flow:
+        1. Create Bonus record
+        2. ActiveBalance (+bonus_amount) - credit
+        3. Create Purchase (auto-purchase options)
+        4. ActiveBalance (-bonus_amount) - debit
+        """
         if purchase.packPrice < REFERRAL_BONUS_MIN_AMOUNT:
             return None
 
@@ -251,14 +260,40 @@ class CommissionService:
 
         bonus_amount = Decimal(str(purchase.packPrice)) * REFERRAL_BONUS_PERCENTAGE
 
+        # Get option to calculate bonus quantity
+        option = self.session.query(Option).filter_by(
+            optionID=purchase.optionID
+        ).first()
+
+        if not option:
+            logger.error(
+                f"Option {purchase.optionID} not found for referral bonus "
+                f"(purchase {purchase.purchaseID})"
+            )
+            return None
+
+        # Calculate bonus options quantity
+        price_per_option = Decimal(str(option.packPrice)) / Decimal(str(option.packQty))
+        bonus_qty = int(bonus_amount / price_per_option)
+
+        if bonus_qty <= 0:
+            logger.warning(
+                f"Referral bonus amount ${bonus_amount} too small to grant options "
+                f"for purchase {purchase.purchaseID}"
+            )
+            return None
+
+        # ═══════════════════════════════════════════════════════════
+        # STEP 1: Create Bonus record (tracking)
+        # ═══════════════════════════════════════════════════════════
         bonus = Bonus()
         bonus.userID = upline_user.userID
         bonus.downlineID = user.userID
         bonus.purchaseID = purchase.purchaseID
         bonus.projectID = purchase.projectID
         bonus.optionID = purchase.optionID
-        bonus.packQty = purchase.packQty
-        bonus.packPrice = purchase.packPrice
+        bonus.packQty = bonus_qty
+        bonus.packPrice = bonus_amount
         bonus.commissionType = "referral"
         bonus.uplineLevel = 1
         bonus.fromRank = user.rank
@@ -266,16 +301,28 @@ class CommissionService:
         bonus.bonusRate = float(REFERRAL_BONUS_PERCENTAGE)
         bonus.bonusAmount = bonus_amount
         bonus.status = "paid"
-        bonus.notes = f"Referral bonus for ${purchase.packPrice} purchase"
+        bonus.notes = f"Referral bonus (1%) - {bonus_qty} options"
         bonus.ownerTelegramID = upline_user.telegramID
         bonus.ownerEmail = upline_user.email
 
         self.session.add(bonus)
         self.session.flush()
 
-        await self._updatePassiveBalance(upline_user.userID, bonus_amount, bonus.bonusID)
+        # ═══════════════════════════════════════════════════════════
+        # STEP 2: Create auto-purchase (OPTIONS, not money!)
+        # ═══════════════════════════════════════════════════════════
+        await self._createReferralAutoPurchase(
+            upline_user,
+            purchase,
+            bonus_amount,
+            bonus_qty,
+            bonus.bonusID
+        )
 
-        logger.info(f"Referral bonus: ${bonus_amount} for user {upline_user.userID}")
+        logger.info(
+            f"✓ Referral bonus: ${bonus_amount} ({bonus_qty} options) "
+            f"for user {upline_user.userID}"
+        )
 
         return {
             "userId": upline_user.userID,
@@ -287,6 +334,95 @@ class CommissionService:
             "compressed": False,
             "isReferralBonus": True
         }
+
+    async def _createReferralAutoPurchase(
+            self,
+            upline_user: User,
+            original_purchase: Purchase,
+            bonus_amount: Decimal,
+            bonus_qty: int,
+            bonus_id: int
+    ):
+        """
+        Create automatic purchase using referral bonus.
+
+        Transaction flow:
+        1. Create Purchase record (auto-purchase options)
+        2. ActiveBalance (+bonus_amount) - bonus credit from company
+        3. ActiveBalance (-bonus_amount) - debit for purchase
+
+        Net effect on user.balanceActive: 0 (credit and debit cancel out)
+        But user gets OPTIONS added to their portfolio.
+
+        Args:
+            upline_user: User receiving referral bonus
+            original_purchase: Purchase that triggered the bonus
+            bonus_amount: Bonus amount (1% of purchase)
+            bonus_qty: Number of options to purchase
+            bonus_id: ID of the Bonus record
+        """
+        logger.debug(
+            f"Creating referral auto-purchase for user {upline_user.userID}: "
+            f"${bonus_amount}, {bonus_qty} options"
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # STEP 1: Create Purchase record (auto-purchase)
+        # ═══════════════════════════════════════════════════════════
+        auto_purchase = Purchase()
+        auto_purchase.userID = upline_user.userID
+        auto_purchase.projectID = original_purchase.projectID
+        auto_purchase.optionID = original_purchase.optionID
+        auto_purchase.projectName = original_purchase.projectName
+        auto_purchase.packQty = bonus_qty
+        auto_purchase.packPrice = bonus_amount
+
+        # AuditMixin fields
+        auto_purchase.ownerTelegramID = upline_user.telegramID
+        auto_purchase.ownerEmail = upline_user.email
+
+        self.session.add(auto_purchase)
+        self.session.flush()  # Get purchaseID
+
+        logger.debug(
+            f"Created referral auto-purchase: purchaseID={auto_purchase.purchaseID}, "
+            f"qty={bonus_qty}, price=${bonus_amount}"
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # STEP 2: Create ActiveBalance transaction records
+        # ═══════════════════════════════════════════════════════════
+
+        # Record 1: Bonus credited (+bonus_amount)
+        bonus_credit = ActiveBalance()
+        bonus_credit.userID = upline_user.userID
+        bonus_credit.firstname = upline_user.firstname
+        bonus_credit.surname = upline_user.surname
+        bonus_credit.amount = bonus_amount
+        bonus_credit.status = 'done'
+        bonus_credit.reason = f'bonus={bonus_id}'
+        bonus_credit.link = ''
+        bonus_credit.notes = 'Referral bonus (1%) - auto-purchase credit'
+
+        self.session.add(bonus_credit)
+
+        # Record 2: Purchase debit (-bonus_amount)
+        purchase_debit = ActiveBalance()
+        purchase_debit.userID = upline_user.userID
+        purchase_debit.firstname = upline_user.firstname
+        purchase_debit.surname = upline_user.surname
+        purchase_debit.amount = -bonus_amount
+        purchase_debit.status = 'done'
+        purchase_debit.reason = f'purchase={auto_purchase.purchaseID}'
+        purchase_debit.link = ''
+        purchase_debit.notes = 'Referral bonus (1%) - auto-purchase debit'
+
+        self.session.add(purchase_debit)
+
+        logger.info(
+            f"✓ Referral auto-purchase completed: {bonus_qty} options worth ${bonus_amount} "
+            f"for user {upline_user.userID}"
+        )
 
     async def _saveCommission(
             self,

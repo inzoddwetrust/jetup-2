@@ -629,10 +629,10 @@ async def create_payment_check_notification(
             source="payment_checker",
             text=text,
             buttons=buttons,
-            target_type="user",
-            target_value=str(admin_id),
+            targetType="user",
+            targetValue=str(admin_id),
             priority=2,
-            parse_mode="HTML",
+            parseMode="HTML",
             category="payment",
             importance="high"
         )
@@ -668,10 +668,10 @@ async def create_user_payment_notification(
         source="payment_processor",
         text=text,
         buttons=buttons,
-        target_type="user",
-        target_value=str(payer.userID),
+        targetType="user",
+        targetValue=str(payer.userID),
         priority=2,
         category="payment",
         importance="high",
-        parse_mode="HTML"
+        parseMode="HTML"
     )

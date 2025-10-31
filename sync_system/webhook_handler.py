@@ -15,7 +15,7 @@ import ipaddress
 from collections import defaultdict
 import asyncio
 
-from init import Session
+from core.db import Session
 from sync_system.sync_engine import UniversalSyncEngine
 from sync_system.sync_config import SUPPORT_TABLES
 from models import Notification
@@ -277,20 +277,33 @@ class WebhookHandler:
     async def notify_security_event(self, message: str):
         """Send notification about security events to admins"""
         try:
+            from config import Config
+
+            # Get admin user IDs from config
+            admin_user_ids = Config.get('ADMIN_USER_IDS') or []
+
+            if not admin_user_ids:
+                logger.error("No admin users configured for security notifications!")
+                return
+
             with Session() as session:
-                # Create notification for admins
-                notification = Notification(
-                    source="webhook_security",
-                    text=f"🔒 Security Alert\n\n{message}\n\nTime: {datetime.now().isoformat()}",
-                    targetType="admins",
-                    targetValue="all",
-                    priority=3,
-                    category="security",
-                    importance="high",
-                    parseMode="HTML"
-                )
-                session.add(notification)
+                # Create notification for each admin
+                for admin_id in admin_user_ids:
+                    notification = Notification(
+                        source="webhook_security",
+                        text=f"🔒 Security Alert\n\n{message}\n\nTime: {datetime.now().isoformat()}",
+                        targetType="user",  # ✅ Valid value
+                        targetValue=str(admin_id),  # ✅ Specific admin userID
+                        priority=3,
+                        category="security",
+                        importance="high",
+                        parseMode="HTML"
+                    )
+                    session.add(notification)
+
                 session.commit()
+                logger.info(f"Security notification sent to {len(admin_user_ids)} admins")
+
         except Exception as e:
             logger.error(f"Failed to send security notification: {e}")
 

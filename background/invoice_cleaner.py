@@ -56,12 +56,12 @@ class InvoiceCleaner:
             notification = Notification(
                 source="invoice_cleaner",
                 text=text,
-                target_type="user",
-                target_value=str(invoice.userID),
+                targetType="user",
+                targetValue=str(invoice.userID),
                 priority=2,
                 category="payment",
                 importance="high",
-                parse_mode="HTML",
+                parseMode="HTML",
                 buttons=buttons
             )
 
@@ -92,12 +92,12 @@ class InvoiceCleaner:
             notification = Notification(
                 source="invoice_cleaner",
                 text=text,
-                target_type="user",
-                target_value=str(invoice.userID),
+                targetType="user",
+                targetValue=str(invoice.userID),
                 priority=2,
                 category="payment",
                 importance="high",
-                parse_mode="HTML",
+                parseMode="HTML",
                 buttons=buttons
             )
 

@@ -5,12 +5,13 @@ from typing import List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from decimal import Decimal
+from sqlalchemy.orm import Session
 
-from google_services import get_google_services
+from core.google_services import get_google_services
 from models import User, Project, Purchase, ActiveBalance, Notification, Option
-from init import Session
-from templates import MessageTemplates
-import config
+from core.db import get_db_session_ctx
+from core.templates import MessageTemplates
+from config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -218,265 +219,177 @@ class LegacyUserProcessor:
                         upliner=record.get('upliner', '').strip(),
                         project=record['project'].strip(),
                         qty=qty,
-                        is_found=str(record.get('IsFound', '')).strip(),
-                        upliner_found=str(record.get('UplinerFound', '')).strip(),
-                        purchase_done=str(record.get('PurchaseDone', '')).strip()
+                        is_found=str(record.get('IsFound', '')),
+                        upliner_found=str(record.get('UplinerFound', '')),
+                        purchase_done=str(record.get('PurchaseDone', ''))
                     )
 
-                    legacy_users.append(legacy_user)
+                    # Only add users that are not completed
+                    if legacy_user.status != MigrationStatus.COMPLETED:
+                        legacy_users.append(legacy_user)
 
                 except Exception as e:
-                    logger.error(f"Error parsing row {idx}: {e}")
+                    logger.error(f"Error parsing record {idx}: {e}")
                     continue
 
-            logger.info(f"Loaded {len(legacy_users)} valid users from cache")
-
-            # Status distribution
-            status_counts = {}
-            for user in legacy_users:
-                status = user.status
-                status_counts[status] = status_counts.get(status, 0) + 1
-            logger.info(f"Status distribution: {dict(status_counts)}")
-
+            logger.info(f"Found {len(legacy_users)} pending users from {len(records)} total")
             return legacy_users
 
         except Exception as e:
-            logger.error(f"Error loading legacy users from cache: {e}", exc_info=True)
+            logger.error(f"Error loading legacy users: {e}")
             return []
 
     async def _process_legacy_users(self) -> MigrationStats:
         """
-        Process all pending legacy users from cached data.
-        Implements locking to prevent concurrent execution.
-        Reloads cache on each run for fresh data.
+        Process legacy users from Google Sheets.
+        Uses per-user sessions for better isolation and commit control.
         """
-        # Check if processing is already running
-        if self._processing:
-            raise RuntimeError("Migration already in progress")
+        stats = MigrationStats()
 
-        self._processing = True
-        try:
-            # Force reload cache at the start of each processing run
-            await self._load_cache(force=True)
+        # Reload cache from sheets
+        await self._load_cache(force=True)
 
-            legacy_users = await self._get_legacy_users()
-            stats = MigrationStats(total_records=len(legacy_users))
-
-            if not legacy_users:
-                return stats
-
-            # Filter pending users (not all three flags are set)
-            pending_users = [
-                user for user in legacy_users
-                if user.status != MigrationStatus.COMPLETED and user.status != MigrationStatus.ERROR
-            ]
-
-            if not pending_users:
-                logger.info("No pending users to process")
-                return stats
-
-            logger.info(f"Processing {len(pending_users)} pending users")
-
-            # Process in batches
-            for i in range(0, len(pending_users), self.batch_size):
-                batch = pending_users[i:i + self.batch_size]
-                logger.debug(
-                    f"Processing batch {i // self.batch_size + 1} of {(len(pending_users) - 1) // self.batch_size + 1}")
-
-                with Session() as session:
-                    for legacy_user in batch:
-                        try:
-                            # Create copy of state before processing
-                            before_state = (legacy_user.is_found, legacy_user.upliner_found, legacy_user.purchase_done)
-
-                            progress_made = await self._process_single_user(session, legacy_user)
-
-                            # Check changes and update statistics
-                            if progress_made:
-                                after_state = (legacy_user.is_found, legacy_user.upliner_found,
-                                               legacy_user.purchase_done)
-
-                                # User found (transition from empty/0 to userID)
-                                if not before_state[0] and after_state[0]:
-                                    stats.users_found += 1
-
-                                # Upliner assigned
-                                if before_state[1] != "1" and after_state[1] == "1":
-                                    stats.upliners_assigned += 1
-
-                                # Purchase created
-                                if before_state[2] != "1" and after_state[2] == "1":
-                                    stats.purchases_created += 1
-
-                                # Check if completed
-                                if legacy_user.status == MigrationStatus.COMPLETED:
-                                    stats.completed += 1
-
-                        except Exception as e:
-                            stats.add_error(legacy_user.email, str(e))
-                            logger.error(f"Error processing {legacy_user.email} row {legacy_user.row_index}: {e}")
-
-                # Small delay between batches to avoid overload
-                await asyncio.sleep(0.1)
-
-            logger.info(
-                f"Migration batch completed: found={stats.users_found}, "
-                f"upliners={stats.upliners_assigned}, purchases={stats.purchases_created}, "
-                f"errors={stats.errors}"
-            )
+        legacy_users = await self._get_legacy_users()
+        if not legacy_users:
             return stats
 
-        finally:
-            # Always release the lock
-            self._processing = False
-            logger.debug("Processing lock released")
+        stats.total_records = len(legacy_users)
+
+        # Process users in batches
+        for i in range(0, len(legacy_users), self.batch_size):
+            batch = legacy_users[i:i + self.batch_size]
+            logger.info(f"Processing batch {i // self.batch_size + 1}: {len(batch)} users")
+
+            for user in batch:
+                with get_db_session_ctx() as session:
+                    try:
+                        success = await self._process_single_user(session, user)
+                        if success:
+                            if user.is_found and user.is_found != "" and user.is_found != "0":
+                                if user.upliner_found == "1":
+                                    if user.purchase_done == "1":
+                                        stats.completed += 1
+                                    else:
+                                        stats.purchases_created += 1
+                                else:
+                                    stats.upliners_assigned += 1
+                            else:
+                                stats.users_found += 1
+                    except Exception as e:
+                        stats.add_error(user.email, str(e))
+                        logger.error(f"Error processing user {user.email}: {e}", exc_info=True)
+
+            # Sleep between batches to avoid overwhelming the system
+            if i + self.batch_size < len(legacy_users):
+                await asyncio.sleep(2)
+
+        return stats
 
     def _get_user_from_legacy_record(self, session: Session, user: LegacyUserRecord) -> Optional[User]:
         """
-        Get user from DB by legacy record.
-        Supports both old format (is_found="1") and new format (is_found=userID).
-        With email normalization for case-insensitive search.
+        Get user from DB using legacy record with normalization support.
+        Searches by normalized email for case-insensitive and Gmail-compatible matching.
         """
-        if not user.is_found or user.is_found in ["", "0"]:
-            return None
+        # Normalize the email from the record
+        normalized_email = self.normalize_email(user.email)
 
-        # New format: is_found contains userID
-        if user.is_found != "1":
-            try:
-                user_id = int(user.is_found)
-                return session.query(User).filter_by(userID=user_id).first()
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid userID format in is_found: {user.is_found}")
-                return None
+        # Get all users
+        all_users = session.query(User).all()
 
-        # Old format: is_found="1", search by email with normalization
-        normalized_search_email = self.normalize_email(user.email)
-        users_with_email = session.query(User).filter(User.email.isnot(None)).all()
-
-        for u in users_with_email:
-            if self.normalize_email(u.email) == normalized_search_email:
-                return u
+        # Search by normalized email
+        for db_user in all_users:
+            if self.normalize_email(db_user.email) == normalized_email:
+                return db_user
 
         return None
 
     async def _process_single_user(self, session: Session, user: LegacyUserRecord) -> bool:
-        progress_made = False
-
+        """
+        Process a single legacy user through the migration pipeline.
+        Each step checks the current state and proceeds accordingly.
+        """
         try:
-            # INDEPENDENT CHECK 1: IsFound
-            if not user.is_found or user.is_found in ["", "0"]:
+            # Step 1: Find user in DB
+            user_found = user.is_found and user.is_found != "" and user.is_found != "0"
+            if not user_found:
                 if await self._find_user(session, user):
-                    progress_made = True
+                    return True
+                return False
 
-            # INDEPENDENT CHECK 2: PurchaseDone (only if user found)
-            if user.is_found and user.is_found not in ["", "0"] and user.purchase_done != "1":
-                if await self._create_purchase(session, user):
-                    user.purchase_done = "1"
-                    progress_made = True
-
-            # INDEPENDENT CHECK 3: UplinerFound (only if user found and has upliner)
-            if (user.is_found and user.is_found not in ["", "0"] and
-                    user.upliner and user.upliner_found != "1"):
+            # Step 2: Assign upliner
+            if user.upliner_found != "1" and user.upliner:
                 if await self._assign_upliner(session, user):
-                    user.upliner_found = "1"
-                    progress_made = True
+                    return True
+                return False
 
-            return progress_made
+            # Step 3: Create purchase
+            if user.purchase_done != "1":
+                if await self._create_purchase(session, user):
+                    return True
+                return False
+
+            return False
 
         except Exception as e:
-            # Only real technical errors increase the counter
-            user.error_count += 1
-            user.last_error = str(e)
-            logger.error(f"Technical error processing {user.email}: {e}", exc_info=True)
+            logger.error(f"Error in _process_single_user for {user.email}: {e}")
             return False
 
     async def _find_user(self, session: Session, user: LegacyUserRecord) -> bool:
+        """
+        Find user in database by email with normalization support.
+        """
         try:
-            # Email normalization for search (case-insensitive)
-            normalized_search_email = self.normalize_email(user.email)
-
-            # Search user with normalized email
-            users_with_email = session.query(User).filter(User.email.isnot(None)).all()
-            db_user = None
-
-            for u in users_with_email:
-                if self.normalize_email(u.email) == normalized_search_email:
-                    db_user = u
-                    break
-
+            db_user = self._get_user_from_legacy_record(session, user)
             if not db_user:
-                logger.debug(f"User {user.email} not found in database")
+                logger.debug(f"User {user.email} (row {user.row_index}) not found in DB yet")
                 return False
 
-            email_confirmed = db_user.emailVerification.get('confirmed', False) if db_user.emailVerification else False
-            if not email_confirmed:
-                logger.debug(f"User {user.email} email not confirmed yet")
-                return False
-
-            # IMPROVEMENT: write userID instead of "1"
+            logger.info(f"LEGACY: Found user {user.email} (row {user.row_index}) -> userID={db_user.userID}")
             await self._update_sheet(user.row_index, 'IsFound', str(db_user.userID))
-            user.is_found = str(db_user.userID)  # Update local copy
-
             await self._send_welcome_notification(db_user, user)
-
-            logger.info(f"Found legacy user: {user.email} -> UserID {db_user.userID}")
             return True
 
         except Exception as e:
-            logger.error(f"Error finding user {user.email}: {e}")
+            logger.error(f"Error finding user {user.email} row {user.row_index}: {e}")
             return False
 
     async def _assign_upliner(self, session: Session, user: LegacyUserRecord) -> bool:
         """
-        Assign upliner to the user based on legacy record.
-        Supports "SAME" keyword to keep existing upliner.
-        Empty upliner field is an error.
+        Assign upliner to user if specified in legacy data.
         """
         try:
-            # Get user from DB
+            if not user.upliner:
+                logger.debug(f"No upliner specified for {user.email}")
+                return False
+
+            # Get current user
             db_user = self._get_user_from_legacy_record(session, user)
             if not db_user:
-                logger.debug(f"User {user.email} not found yet")
+                logger.debug(f"User {user.email} not found yet, will try again later")
                 return False
 
-            # CRITICAL: Empty upliner is an error - operator must think!
-            if not user.upliner:
-                logger.error(f"Empty upliner for {user.email} at row {user.row_index} - skipping")
-                return False
-
-            # Handle "SAME" keyword - keep existing upliner
-            if user.upliner.upper() == "SAME":
-                logger.info(f"Keeping existing upliner {db_user.upline} for {user.email} (row {user.row_index})")
-                await self._update_sheet(user.row_index, 'UplinerFound', '1')
-                return True
-
-            # Find upliner by email with normalization
+            # Find upliner by email
+            all_users = session.query(User).all()
             normalized_upliner_email = self.normalize_email(user.upliner)
 
-            # Search for upliner with case-insensitive email
-            users_with_email = session.query(User).filter(User.email.isnot(None)).all()
             upliner = None
-            for u in users_with_email:
+            for u in all_users:
                 if self.normalize_email(u.email) == normalized_upliner_email:
                     upliner = u
                     break
 
             if not upliner:
-                logger.debug(f"Upliner {user.upliner} not found yet")
+                logger.warning(f"Upliner {user.upliner} not found for user {user.email}")
                 return False
 
-            # Check if upliner's email is confirmed
-            email_confirmed = upliner.emailVerification.get('confirmed', False) if upliner.emailVerification else False
-            if not email_confirmed:
-                logger.debug(f"Upliner {user.upliner} email not confirmed yet")
-                return False
+            # Check if upliner assignment is needed
+            old_upline = db_user.upline if hasattr(db_user, 'upline') else None
 
-            old_upline = db_user.upline
+            # Get default referrer ID from config
+            default_referrer_id = Config.get(Config.DEFAULT_REFERRER_ID)
 
-            # LEGACY MIGRATION: FORCEFULLY set upliner from table
-            # Legacy data is the truth, it overwrites any existing upliner
             if old_upline != upliner.telegramID:
-                if old_upline and old_upline != config.DEFAULT_REFERRER_ID:
+                if old_upline and old_upline != default_referrer_id:
                     logger.info(
                         f"LEGACY: Changing upliner for {user.email} (row {user.row_index}) "
                         f"from {old_upline} to {upliner.telegramID}"
@@ -622,7 +535,7 @@ class LegacyUserProcessor:
                 priority=2, category="legacy", importance="high", parseMode="HTML"
             )
 
-            with Session() as session:
+            with get_db_session_ctx() as session:
                 session.add(notification)
                 session.commit()
         except Exception as e:
@@ -654,7 +567,7 @@ class LegacyUserProcessor:
                 priority=2, category="legacy", importance="normal", parseMode="HTML"
             )
 
-            with Session() as session:
+            with get_db_session_ctx() as session:
                 session.add(user_notification)
                 session.add(upliner_notification)
                 session.commit()
@@ -678,7 +591,7 @@ class LegacyUserProcessor:
                 priority=2, category="legacy", importance="high", parseMode="HTML"
             )
 
-            with Session() as session:
+            with get_db_session_ctx() as session:
                 session.add(user_notification)
                 session.commit()
         except Exception as e:
