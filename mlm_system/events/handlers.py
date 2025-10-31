@@ -12,6 +12,7 @@ from models.user import User
 from mlm_system.services.commission_service import CommissionService
 from mlm_system.services.volume_service import VolumeService
 from mlm_system.services.investment_bonus_service import InvestmentBonusService
+from mlm_system.services.grace_day_service import GraceDayService
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +21,12 @@ async def handle_purchase_completed(data: Dict[str, Any]):
     """
     Handle PURCHASE_COMPLETED event.
 
-    This event triggers FOUR independent processes:
+    This event triggers FIVE independent processes:
     1. Volume updates (PV, FV, TV with 50% rule)
     2. Pioneer Bonus eligibility check
-    3. Investment bonus check and processing
-    4. Commission calculations (differential, compression, bonuses)
+    3. Grace Day bonus check (+5% if purchased on 1st)
+    4. Investment bonus check and processing
+    5. Commission calculations (differential, compression, bonuses)
 
     Args:
         data: Event data with 'purchaseId' key
@@ -79,7 +81,33 @@ async def handle_purchase_completed(data: Dict[str, Any]):
             # Don't fail - continue
 
         # ═══════════════════════════════════════════════════════════
-        # STEP 2: Check and process investment bonus
+        # ✨ NEW STEP 2: Grace Day Bonus (+5% if purchased on 1st)
+        # ═══════════════════════════════════════════════════════════
+        grace_day_granted = False
+        try:
+            grace_day_service = GraceDayService(session)
+            grace_result = await grace_day_service.processGraceDayBonus(purchase)
+
+            if grace_result:
+                grace_day_granted = True
+                logger.info(
+                    f"✓ Grace Day bonus granted for purchase {purchase_id}: "
+                    f"+${grace_result['bonusAmount']} "
+                    f"({grace_result['bonusQty']} options), "
+                    f"loyalty streak: {grace_result['loyaltyStreak']} months"
+                )
+            else:
+                logger.debug(f"Purchase {purchase_id} not eligible for Grace Day bonus")
+
+        except Exception as e:
+            logger.error(
+                f"Error processing Grace Day bonus for purchase {purchase_id}: {e}",
+                exc_info=True
+            )
+            # Don't return - continue to process other bonuses
+
+        # ═══════════════════════════════════════════════════════════
+        # STEP 3: Check and process investment bonus
         # ═══════════════════════════════════════════════════════════
         investment_bonus_amount = None
         try:
@@ -102,7 +130,7 @@ async def handle_purchase_completed(data: Dict[str, Any]):
             # Don't return - continue to process commissions
 
         # ═══════════════════════════════════════════════════════════
-        # STEP 3: Calculate and distribute MLM commissions
+        # STEP 4: Calculate and distribute MLM commissions
         # ═══════════════════════════════════════════════════════════
         try:
             commission_service = CommissionService(session)
@@ -127,7 +155,7 @@ async def handle_purchase_completed(data: Dict[str, Any]):
             # Don't return - we already processed volumes and bonuses
 
         # ═══════════════════════════════════════════════════════════
-        # STEP 4: Send notifications to user
+        # STEP 5: Send notifications to user
         # ═══════════════════════════════════════════════════════════
 
         # Send pioneer bonus notification if granted
@@ -137,6 +165,16 @@ async def handle_purchase_completed(data: Dict[str, Any]):
             except Exception as e:
                 logger.error(
                     f"Error sending pioneer bonus notification: {e}",
+                    exc_info=True
+                )
+
+        # ✨ NEW: Send Grace Day notification if granted
+        if grace_day_granted:
+            try:
+                await _send_grace_day_notification(session, purchase)
+            except Exception as e:
+                logger.error(
+                    f"Error sending grace day notification: {e}",
                     exc_info=True
                 )
 
@@ -318,6 +356,56 @@ async def _send_pioneer_bonus_notification(session, purchase: Purchase):
 
     except Exception as e:
         logger.error(f"Failed to create pioneer bonus notification: {e}", exc_info=True)
+
+
+async def _send_grace_day_notification(session, purchase: Purchase):
+    """
+    Send notification to user about Grace Day bonus.
+    Uses Notification model for queued delivery.
+    """
+    from models.notification import Notification
+    from core.templates import MessageTemplates
+
+    try:
+        user = purchase.user
+
+        # Get loyalty streak info
+        loyalty_streak = 0
+        if user.mlmVolumes:
+            loyalty_streak = user.mlmVolumes.get("graceDayStreak", 0)
+
+        # Get template
+        text, buttons = await MessageTemplates.get_raw_template(
+            '/mlm/grace_day_bonus_granted',
+            {
+                'purchase_amount': float(purchase.packPrice),
+                'bonus_percentage': 5.0,
+                'loyalty_streak': loyalty_streak,
+                'loyalty_required': 3
+            },
+            lang=user.lang or 'en'
+        )
+
+        # Create notification
+        notification = Notification(
+            source="mlm_system",
+            text=text,
+            buttons=buttons,
+            target_type="user",
+            target_value=str(user.userID),
+            priority=2,
+            category="mlm",
+            importance="medium",
+            parse_mode="HTML"
+        )
+
+        session.add(notification)
+        session.commit()
+
+        logger.info(f"Grace Day bonus notification queued for user {user.userID}")
+
+    except Exception as e:
+        logger.error(f"Failed to create grace day notification: {e}", exc_info=True)
 
 
 async def _send_investment_bonus_notification(

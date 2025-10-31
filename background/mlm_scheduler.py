@@ -87,9 +87,13 @@ class MLMScheduler:
 
         # Monthly tasks
         if self.lastMonth != currentMonth:
-            # 1st of month at 00:00 - reset volumes
+            # 1st of month at 00:00 - reset volumes, process Autoship
             if currentDay == 1 and currentHour == 0:
                 await self.executeFirstOfMonthTasks()
+
+            # ✨ NEW: 2nd of month at 00:00 - reset Grace Day streaks
+            elif currentDay == 2 and currentHour == 0:
+                await self.executeSecondOfMonthTasks()
 
             # 3rd of month at 00:00 - calculate Global Pool
             elif currentDay == 3 and currentHour == 0:
@@ -188,6 +192,41 @@ class MLMScheduler:
         finally:
             session.close()
 
+    async def executeSecondOfMonthTasks(self):
+        """
+        Execute tasks on 2nd of month.
+
+        Tasks:
+        - Reset Grace Day streaks for users who didn't purchase on 1st
+        """
+        logger.info(f"Executing second-of-month tasks for {timeMachine.currentMonth}")
+        session = get_session()
+
+        try:
+            # Import here to avoid circular dependency
+            from mlm_system.services.grace_day_service import GraceDayService
+
+            # Reset streaks for users who missed Grace Day
+            grace_day_service = GraceDayService(session)
+            reset_result = await grace_day_service.resetMonthlyStreaks()
+
+            logger.info(
+                f"Grace Day streak reset complete: "
+                f"{reset_result['resetsCount']} users reset"
+            )
+
+            session.commit()
+            self.stats["tasksExecuted"] += 1
+            self.stats["lastExecutedAt"] = datetime.now(timezone.utc).isoformat()
+
+        except Exception as e:
+            logger.error(f"Error in second-of-month tasks: {e}", exc_info=True)
+            session.rollback()
+            self.stats["errors"] += 1
+            self.stats["lastError"] = str(e)
+        finally:
+            session.close()
+
     async def executeThirdOfMonthTasks(self):
         """Execute tasks on 3rd of month."""
         logger.info(f"Executing third-of-month tasks for {timeMachine.currentMonth}")
@@ -253,22 +292,18 @@ class MLMScheduler:
             logger.info(f"Updated ranks for {updatedCount} users")
 
     async def processGraceDay(self, session):
-        """Process Grace Day bonuses if applicable."""
+        """
+        Process Grace Day bonuses if applicable.
+
+        NOTE: Grace Day bonus is now handled in event handler
+        (mlm_system/events/handlers.py) when PURCHASE_COMPLETED is emitted.
+
+        This method is kept for potential future Grace Day-specific tasks.
+        """
         if not timeMachine.isGraceDay:
             return
 
-        logger.info("Processing Grace Day bonuses")
-
-        # Find users who made purchases on Grace Day
-        activeUsers = session.query(User).filter(
-            User.isActive == True,
-            User.lastActiveMonth == timeMachine.currentMonth
-        ).all()
-
-        # TODO: Implement Grace Day bonus logic (+5% options)
-        # This will be implemented later as per CODE_COMPLIANCE_REPORT
-
-        logger.info(f"Processed Grace Day for {len(activeUsers)} active users")
+        logger.info("Grace Day active - bonuses will be processed on purchase")
 
     async def processAutoship(self, session):
         """Process Autoship subscriptions."""
