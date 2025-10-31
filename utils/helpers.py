@@ -2,7 +2,7 @@ from typing import Tuple
 from models import User
 import logging
 from aiogram.types import Message, CallbackQuery
-from config import REQUIRED_CHANNELS
+from config import Config
 from datetime import datetime, timezone
 
 from decimal import Decimal
@@ -99,11 +99,11 @@ async def check_user_subscriptions(bot, user_id: int, user_lang: str = "en") -> 
     not_subscribed = []
 
     # Определяем каналы для проверки
-    lang_channels = [c for c in REQUIRED_CHANNELS if c.get("lang") == user_lang]
+    lang_channels = [c for c in Config.get(Config.REQUIRED_CHANNELS, []) if c.get("lang") == user_lang]
 
     # Если нет каналов на языке пользователя, используем английские
     if not lang_channels:
-        lang_channels = [c for c in REQUIRED_CHANNELS if c.get("lang") == "en"]
+        lang_channels = [c for c in Config.get(Config.REQUIRED_CHANNELS, []) if c.get("lang") == "en"]
 
     # Проверяем подписки
     for channel in lang_channels:
@@ -143,6 +143,9 @@ def set_email_last_sent(user: User, timestamp: datetime) -> None:
         user.emailVerification = {}
     user.emailVerification['sentAt'] = timestamp.isoformat()
     user.emailVerification['attempts'] = user.emailVerification.get('attempts', 0) + 1
+
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(user, 'emailVerification')
 
 
 def get_email_last_sent(user: User) -> Optional[datetime]:

@@ -153,6 +153,9 @@ class RankService:
             user.mlmStatus = {}
         user.mlmStatus["rankQualifiedAt"] = timeMachine.now.isoformat()
 
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(user, 'mlmStatus')
+
         self.session.commit()
 
         logger.info(
@@ -192,6 +195,9 @@ class RankService:
         user.mlmStatus["assignedRank"] = newRank
         user.mlmStatus["assignedBy"] = founderId
         user.mlmStatus["assignedAt"] = timeMachine.now.isoformat()
+
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(user, 'mlmStatus')
 
         # Record in history
         history = RankHistory(

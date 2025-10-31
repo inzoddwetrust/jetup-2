@@ -246,6 +246,9 @@ class User(Base):
         if value:
             self.emailVerification['confirmedAt'] = datetime.now(timezone.utc).isoformat()
 
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(self, 'emailVerification')
+
     # === PROPERTY для настроек стратегии (для старого кода) ===
     @property
     def strategy(self):
@@ -260,6 +263,9 @@ class User(Base):
         if not self.settings:
             self.settings = {}
         self.settings['strategy'] = value
+
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(self, 'settings')
 
     # === PROPERTY для pioneer статуса ===
     @property
@@ -276,6 +282,9 @@ class User(Base):
             self.mlmStatus = {}
         self.mlmStatus['isFounder'] = bool(value)
 
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(self, 'mlmStatus')
+
     # === PROPERTY для месячного PV ===
     @property
     def monthlyPV(self):
@@ -291,6 +300,9 @@ class User(Base):
             self.mlmVolumes = {}
         self.mlmVolumes['monthlyPV'] = float(value)
 
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(self, 'mlmVolumes')
+
     # === PROPERTY для личного объема ===
     @property
     def personalVolume(self):
@@ -305,6 +317,9 @@ class User(Base):
         if not self.mlmVolumes:
             self.mlmVolumes = {}
         self.mlmVolumes['personalTotal'] = float(value)
+
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(self, 'mlmVolumes')
 
     # === HELPER методы для удобства ===
     def has_filled_data(self):
@@ -335,12 +350,18 @@ class User(Base):
         self.emailVerification['confirmed'] = False
         self.emailVerification['sentAt'] = datetime.now(timezone.utc).isoformat()
 
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(self, 'emailVerification')
+
     def mark_email_verified(self):
         """Отметка email как подтвержденного"""
         if not self.emailVerification:
             self.emailVerification = {}
         self.emailVerification['confirmed'] = True
         self.emailVerification['confirmedAt'] = datetime.now(timezone.utc).isoformat()
+
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(self, 'emailVerification')
 
     def get_email_attempts(self):
         """Получение количества попыток отправки email"""

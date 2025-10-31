@@ -241,9 +241,15 @@ async def _check_pioneer_bonus_eligibility(session, purchase: Purchase) -> bool:
     user_mlm_status["pioneerPurchaseId"] = purchase.purchaseID
     user.mlmStatus = user_mlm_status
 
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(user, 'mlmStatus')
+
     # Increment global counter
     root_mlm_status["pioneerPurchasesCount"] = pioneer_count + 1
     root_user.mlmStatus = root_mlm_status
+
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(root_user, 'mlmStatus')
 
     session.commit()
 

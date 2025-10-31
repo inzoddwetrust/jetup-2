@@ -250,6 +250,9 @@ class VolumeService:
             if user.mlmVolumes:
                 user.mlmVolumes["monthlyPV"] = 0.0
 
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(user, 'mlmVolumes')
+
             # Reset monthly activity
             user.isActive = False
 
@@ -404,6 +407,9 @@ class VolumeService:
             Decimal(user.mlmVolumes.get("monthlyPV", "0")) + amount
         )
 
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(user, 'mlmVolumes')
+
         # Check activation status
         monthlyPv = Decimal(user.mlmVolumes["monthlyPV"])
         if monthlyPv >= MINIMUM_PV:
@@ -412,6 +418,9 @@ class VolumeService:
 
             if user.mlmStatus:
                 user.mlmStatus["lastActiveMonth"] = currentMonth
+
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(user, 'mlmStatus')
 
         logger.debug(
             f"Updated PV for user {user.userID}: "
