@@ -418,46 +418,45 @@ class MLMScheduler:
 
     async def processMonthlyPayments(self, session):
         """
-        Process monthly payments for all pending bonuses.
+        Process pending monthly payments - differential commissions and Global Pool.
 
-        Processes bonuses by type:
-        - differential: Commission payouts
-        - referral_bonus: Referral rewards
-        - pioneer_bonus: Pioneer rewards
-        - investment_bonus: Investment package bonuses
-        - global_pool: Global pool distributions
-        - grace_day: Grace Day bonuses
+        Called on 5th of each month.
 
-        Returns:
-            Dict with processing statistics
+        This method:
+        1. Finds all pending bonuses (differential + global_pool)
+        2. Creates PassiveBalance transactions
+        3. Updates user.balancePassive
+        4. Changes bonus status to "paid"
+        5. Creates notifications for users
+
+        Transaction flow (double-entry bookkeeping):
+        - Bonus record: tracking/audit
+        - PassiveBalance record: transaction history
+        - user.balancePassive: current balance total
         """
-        logger.info("Processing monthly payments")
+        from models import PassiveBalance, Notification
+        from decimal import Decimal
 
-        # Get all pending bonuses
+        logger.info("Processing monthly payments (differential + global_pool)")
+
+        # Find pending bonuses that should be paid on 5th
         pendingBonuses = session.query(Bonus).filter(
-            Bonus.status == "pending"
+            Bonus.status == "pending",
+            Bonus.commissionType.in_(["differential", "global_pool"])
         ).all()
 
         if not pendingBonuses:
             logger.info("No pending bonuses to process")
-            return {
-                "success": True,
-                "processed": 0,
-                "totalAmount": 0.0,
-                "errors": 0
-            }
-
-        logger.info(f"Found {len(pendingBonuses)} pending bonuses")
+            return
 
         processedCount = 0
+        totalAmount = Decimal("0")
         errors = 0
-        totalAmount = 0
 
         for bonus in pendingBonuses:
             try:
                 # Get user
                 user = session.query(User).filter_by(userID=bonus.userID).first()
-
                 if not user:
                     logger.error(f"User {bonus.userID} not found for bonus {bonus.bonusID}")
                     bonus.status = "error"
@@ -465,30 +464,84 @@ class MLMScheduler:
                     errors += 1
                     continue
 
-                # Mark bonus as paid
+                # ═══════════════════════════════════════════════════════════
+                # STEP 1: Create PassiveBalance transaction (double-entry)
+                # ═══════════════════════════════════════════════════════════
+                passive_transaction = PassiveBalance()
+                passive_transaction.userID = bonus.userID
+                passive_transaction.firstname = user.firstname
+                passive_transaction.surname = user.surname
+                passive_transaction.amount = bonus.bonusAmount
+                passive_transaction.status = "done"
+                passive_transaction.reason = f"bonus={bonus.bonusID}"
+                passive_transaction.link = ""
+
+                # Set appropriate notes based on bonus type
+                if bonus.commissionType == "differential":
+                    passive_transaction.notes = f"Differential commission - Level {bonus.uplineLevel or 'N/A'}"
+                elif bonus.commissionType == "global_pool":
+                    passive_transaction.notes = f"Global Pool {timeMachine.currentMonth}"
+                else:
+                    passive_transaction.notes = "MLM commission"
+
+                session.add(passive_transaction)
+
+                # ═══════════════════════════════════════════════════════════
+                # STEP 2: Update user's passive balance total
+                # ═══════════════════════════════════════════════════════════
+                user.balancePassive = (user.balancePassive or Decimal("0")) + bonus.bonusAmount
+
+                # ═══════════════════════════════════════════════════════════
+                # STEP 3: Update bonus status
+                # ═══════════════════════════════════════════════════════════
                 bonus.status = "paid"
 
-                # Create notification for user
+                # ═══════════════════════════════════════════════════════════
+                # STEP 4: Create notification for user (via templates)
+                # ═══════════════════════════════════════════════════════════
                 try:
-                    from models.notification import Notification
+                    from core.templates import MessageTemplates
 
-                    notification = Notification(
-                        source="mlm_system",
-                        text=(
-                            f"💰 <b>Bonus Processed</b>\n\n"
-                            f"Type: {bonus.commissionType}\n"
-                            f"Amount: ${bonus.bonusAmount:.2f}\n"
-                            f"Status: Paid"
-                        ),
-                        target_type="user",
-                        target_value=str(user.userID),
-                        priority=2,
-                        category="mlm",
-                        importance="high",
-                        parse_mode="HTML"
-                    )
+                    # Select appropriate template based on bonus type
+                    if bonus.commissionType == "differential":
+                        template_key = '/mlm/differential_commission_paid'
+                        template_vars = {
+                            'bonus_amount': float(bonus.bonusAmount),
+                            'level': bonus.uplineLevel or 'N/A',
+                            'month': timeMachine.currentMonth
+                        }
+                    elif bonus.commissionType == "global_pool":
+                        template_key = '/mlm/global_pool_paid'
+                        template_vars = {
+                            'bonus_amount': float(bonus.bonusAmount),
+                            'month': timeMachine.currentMonth
+                        }
+                    else:
+                        # Skip notification for unknown types
+                        template_key = None
 
-                    session.add(notification)
+                    if template_key:
+                        # Get template text and buttons
+                        text, buttons = await MessageTemplates.get_raw_template(
+                            template_key,
+                            template_vars,
+                            lang=user.lang or 'en'
+                        )
+
+                        # Create notification
+                        notification = Notification(
+                            source="mlm_system",
+                            text=text,
+                            buttons=buttons,
+                            target_type="user",
+                            target_value=str(bonus.userID),
+                            priority=2,
+                            category="mlm",
+                            importance="high",
+                            parse_mode="HTML"
+                        )
+
+                        session.add(notification)
 
                 except Exception as notif_error:
                     # Don't fail entire payment if notification fails
