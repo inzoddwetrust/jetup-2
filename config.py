@@ -2,10 +2,18 @@
 """
 Configuration management for Jetup bot.
 Loads from .env and Google Sheets, validates critical keys.
+
+Enhanced with dynamic values support for:
+- Crypto rates (BNB, ETH, TRX) - auto-update every 5 minutes
+- Statistics (users, projects, invested total) - auto-update periodically
 """
 import os
+import json
+import asyncio
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Callable, Optional
+from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -20,19 +28,29 @@ class Config:
     """
     Configuration manager with static and dynamic values.
 
+    Static values: Loaded from .env, immutable
+    Dynamic values: Auto-updated periodically (crypto rates, stats)
+
     Usage:
         # Load from .env
         Config.initialize_from_env()
 
-        # Get value
+        # Get static value
         token = Config.get(Config.API_TOKEN)
 
-        # Set dynamic value
-        Config.set(Config.SYSTEM_READY, True)
+        # Get dynamic value (with auto-update check)
+        rates = await Config.get_dynamic(Config.CRYPTO_RATES)
+
+        # Register dynamic value
+        Config.register_dynamic(
+            Config.CRYPTO_RATES,
+            get_crypto_rates_func,
+            interval=300  # 5 minutes
+        )
     """
 
     # ═══════════════════════════════════════════════════════════════════════
-    # CONFIGURATION KEYS
+    # STATIC CONFIGURATION KEYS (from .env)
     # ═══════════════════════════════════════════════════════════════════════
 
     # Telegram Bot
@@ -97,6 +115,19 @@ class Config:
     ADMIN_LINKS = "ADMIN_LINKS"
 
     # ═══════════════════════════════════════════════════════════════════════
+    # DYNAMIC CONFIGURATION KEYS (auto-updated)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # Crypto rates (updated every 5 minutes)
+    CRYPTO_RATES = "crypto_rates"
+
+    # Statistics (updated periodically)
+    USERS_COUNT = "users_count"
+    PROJECTS_COUNT = "projects_count"
+    INVESTED_TOTAL = "invested_total"
+    SORTED_PROJECTS = "sorted_projects"
+
+    # ═══════════════════════════════════════════════════════════════════════
     # CRITICAL KEYS (must be present)
     # ═══════════════════════════════════════════════════════════════════════
 
@@ -110,11 +141,23 @@ class Config:
     # STORAGE
     # ═══════════════════════════════════════════════════════════════════════
 
+    # Static values from .env
     _config: Dict[str, Any] = {}
     _initialized: bool = False
 
+    # Dynamic values with auto-update
+    _dynamic_values: Dict[str, Any] = {}
+    _update_functions: Dict[str, Callable] = {}
+    _update_intervals: Dict[str, int] = {}
+    _last_updates: Dict[str, datetime] = {}
+    _is_updating: Dict[str, bool] = {}  # Prevent concurrent updates
+
+    # Update loop control
+    _update_loop_task: Optional[asyncio.Task] = None
+    _update_loop_running: bool = False
+
     # ═══════════════════════════════════════════════════════════════════════
-    # METHODS
+    # STATIC CONFIGURATION METHODS
     # ═══════════════════════════════════════════════════════════════════════
 
     @classmethod
@@ -123,97 +166,108 @@ class Config:
         Load configuration from .env file.
 
         Raises:
-            ConfigurationError: If .env file not found or parsing fails
+            ConfigurationError: If critical keys are missing
         """
-        load_dotenv()
-
-        logger.info("Loading configuration from environment...")
-
         try:
-            import json
-            from decimal import Decimal
+            load_dotenv()
+            logger.info("Loading configuration from .env...")
 
-            # Telegram
+            # ─────────────────────────────────────────────────────────────────
+            # Telegram Bot
+            # ─────────────────────────────────────────────────────────────────
             cls._config[cls.API_TOKEN] = os.getenv("API_TOKEN")
 
             admin_ids_str = os.getenv("ADMIN_USER_IDS", "")
-            if admin_ids_str:
-                cls._config[cls.ADMIN_USER_IDS] = [
-                    int(x.strip()) for x in admin_ids_str.split(',')
-                ]
-            else:
-                cls._config[cls.ADMIN_USER_IDS] = []
+            cls._config[cls.ADMIN_USER_IDS] = [
+                int(uid.strip()) for uid in admin_ids_str.split(",") if uid.strip()
+            ]
 
+            # ─────────────────────────────────────────────────────────────────
             # Database
-            cls._config[cls.DATABASE_URL] = os.getenv(
-                "DATABASE_URL",
-                "sqlite:///jetup.db"
-            )
+            # ─────────────────────────────────────────────────────────────────
+            cls._config[cls.DATABASE_URL] = os.getenv("DATABASE_URL")
 
+            # ─────────────────────────────────────────────────────────────────
             # Google Services
+            # ─────────────────────────────────────────────────────────────────
             cls._config[cls.GOOGLE_SHEET_ID] = os.getenv("GOOGLE_SHEET_ID")
             cls._config[cls.GOOGLE_CREDENTIALS_PATH] = os.getenv(
                 "GOOGLE_CREDENTIALS_PATH",
-                "creds/google_credentials.json"
+                "/opt/jetup/creds/google_credentials.json"
             )
 
+            # ─────────────────────────────────────────────────────────────────
             # Email - Mailgun
+            # ─────────────────────────────────────────────────────────────────
             cls._config[cls.MAILGUN_API_KEY] = os.getenv("MAILGUN_API_KEY")
             cls._config[cls.MAILGUN_DOMAIN] = os.getenv("MAILGUN_DOMAIN")
-            cls._config[cls.MAILGUN_REGION] = os.getenv("MAILGUN_REGION", "eu")
             cls._config[cls.MAILGUN_FROM_EMAIL] = os.getenv(
                 "MAILGUN_FROM_EMAIL",
-                "noreply@talentir.info"
+                "noreply@jetup.info"
+            )
+            cls._config[cls.MAILGUN_REGION] = os.getenv("MAILGUN_REGION", "eu")
+            cls._config[cls.SECURE_EMAIL_DOMAINS] = os.getenv(
+                "SECURE_EMAIL_DOMAINS",
+                "@t-online.de,@gmx.de,@web.de"
             )
 
+            # ─────────────────────────────────────────────────────────────────
             # Email - SMTP
-            cls._config[cls.SMTP_HOST] = os.getenv("SMTP_HOST")
+            # ─────────────────────────────────────────────────────────────────
+            cls._config[cls.SMTP_HOST] = os.getenv("SMTP_HOST", "mail.jetup.info")
             cls._config[cls.SMTP_PORT] = int(os.getenv("SMTP_PORT", "587"))
             cls._config[cls.SMTP_USERNAME] = os.getenv("SMTP_USERNAME")
             cls._config[cls.SMTP_PASSWORD] = os.getenv("SMTP_PASSWORD")
             cls._config[cls.SMTP_USE_TLS] = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
-            cls._config[cls.SMTP_FROM_EMAIL] = os.getenv("SMTP_FROM_EMAIL")
+            cls._config[cls.SMTP_FROM_EMAIL] = os.getenv(
+                "SMTP_FROM_EMAIL",
+                "noreply@jetup.info"
+            )
 
-            # Parse secure email domains (JSON array)
-            secure_domains_str = os.getenv("SECURE_EMAIL_DOMAINS", "[]")
-            try:
-                cls._config[cls.SECURE_EMAIL_DOMAINS] = json.loads(secure_domains_str)
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse SECURE_EMAIL_DOMAINS JSON: {e}")
-                cls._config[cls.SECURE_EMAIL_DOMAINS] = []
-
+            # ─────────────────────────────────────────────────────────────────
             # BookStack
-            cls._config[cls.BOOKSTACK_URL] = os.getenv("BOOKSTACK_URL")
+            # ─────────────────────────────────────────────────────────────────
+            cls._config[cls.BOOKSTACK_URL] = os.getenv(
+                "BOOKSTACK_URL",
+                "https://jetup.info"
+            )
             cls._config[cls.BOOKSTACK_TOKEN_ID] = os.getenv("BOOKSTACK_TOKEN_ID")
             cls._config[cls.BOOKSTACK_TOKEN_SECRET] = os.getenv("BOOKSTACK_TOKEN_SECRET")
 
+            # ─────────────────────────────────────────────────────────────────
             # MLM System
-            cls._config[cls.DEFAULT_REFERRER_ID] = os.getenv("DEFAULT_REFERRER_ID")
+            # ─────────────────────────────────────────────────────────────────
+            cls._config[cls.DEFAULT_REFERRER_ID] = int(
+                os.getenv("DEFAULT_REFERRER_ID", "0")
+            )
 
             # Strategy coefficients (JSON format)
-            strategy_str = os.getenv("STRATEGY_COEFFICIENTS", "{}")
+            strategy_str = os.getenv(
+                "STRATEGY_COEFFICIENTS",
+                '{"manual": 1.0, "safe": 4.5, "aggressive": 11.0, "risky": 25.0}'
+            )
             try:
                 cls._config[cls.STRATEGY_COEFFICIENTS] = json.loads(strategy_str)
             except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse STRATEGY_COEFFICIENTS JSON: {e}")
-                cls._config[cls.STRATEGY_COEFFICIENTS] = {}
+                logger.error(f"Failed to parse STRATEGY_COEFFICIENTS: {e}")
+                cls._config[cls.STRATEGY_COEFFICIENTS] = {
+                    "manual": 1.0,
+                    "safe": 4.5,
+                    "aggressive": 11.0,
+                    "risky": 25.0
+                }
 
-            # ═══════════════════════════════════════════════════════════════════════
-            # MLM - INVESTMENT PACKAGE BONUSES
-            # ═══════════════════════════════════════════════════════════════════════
-
-            investment_tiers_str = os.getenv("INVESTMENT_BONUS_TIERS")
-            if investment_tiers_str:
+            # Investment bonus tiers (parsed from JSON string)
+            tiers_str = os.getenv("INVESTMENT_BONUS_TIERS")
+            if tiers_str:
                 try:
-                    # Parse JSON and convert to Decimal for precision
-                    tiers_dict = json.loads(investment_tiers_str)
-                    parsed_tiers = {
-                        Decimal(str(k)): Decimal(str(v))
-                        for k, v in tiers_dict.items()
+                    tiers_dict = json.loads(tiers_str)
+                    # Convert string keys to Decimal for precision
+                    cls._config[cls.INVESTMENT_BONUS_TIERS] = {
+                        Decimal(k): Decimal(str(v)) for k, v in tiers_dict.items()
                     }
-                    cls._config[cls.INVESTMENT_BONUS_TIERS] = parsed_tiers
-                    logger.info(f"✓ Loaded {len(parsed_tiers)} investment bonus tiers from .env")
-                except Exception as e:
+                    logger.info(f"✓ Loaded {len(tiers_dict)} investment bonus tiers from .env")
+                except (json.JSONDecodeError, ValueError) as e:
                     logger.error(f"Error parsing INVESTMENT_BONUS_TIERS: {e}")
                     # Set default tiers on error
                     cls._config[cls.INVESTMENT_BONUS_TIERS] = {
@@ -233,7 +287,9 @@ class Config:
                 }
                 logger.info("✓ Using default investment bonus tiers (not configured in .env)")
 
+            # ─────────────────────────────────────────────────────────────────
             # Payment & Wallets
+            # ─────────────────────────────────────────────────────────────────
             cls._config[cls.WALLET_TRC] = os.getenv("WALLET_TRC")
             cls._config[cls.WALLET_ETH] = os.getenv("WALLET_ETH")
 
@@ -246,283 +302,387 @@ class Config:
                 cls._config[cls.WALLETS] = {}
 
             # Stablecoins (JSON format)
-            stablecoins_str = os.getenv("STABLECOINS", "{}")
+            stablecoins_str = os.getenv("STABLECOINS", '["USDT-ERC20", "USDT-BSC20", "USDT-TRC20"]')
             try:
                 cls._config[cls.STABLECOINS] = json.loads(stablecoins_str)
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse STABLECOINS JSON: {e}")
-                cls._config[cls.STABLECOINS] = {
-                    "USDT-ERC20": "ETH",
-                    "USDT-BSC20": "BSC",
-                    "USDT-TRC20": "TRX"
-                }
+                cls._config[cls.STABLECOINS] = ["USDT-ERC20", "USDT-BSC20", "USDT-TRC20"]
 
-            # Transaction browsers
-            tx_browsers_str = os.getenv("TX_BROWSERS", "{}")
+            # Transaction browsers (JSON format)
+            tx_browsers_str = os.getenv(
+                "TX_BROWSERS",
+                '{"ETH": "https://etherscan.io/tx/", "BSC": "https://bscscan.com/tx/", "TRX": "https://tronscan.org/#/transaction/"}'
+            )
             try:
                 cls._config[cls.TX_BROWSERS] = json.loads(tx_browsers_str)
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse TX_BROWSERS JSON: {e}")
                 cls._config[cls.TX_BROWSERS] = {
                     "ETH": "https://etherscan.io/tx/",
-                    "USDT-ERC20": "https://etherscan.io/tx/",
-                    "USDT-BSC20": "https://bscscan.com/tx/",
-                    "TRX": "https://tronscan.org/#/transaction/",
-                    "USDT-TRC20": "https://tronscan.org/#/transaction/"
+                    "BSC": "https://bscscan.com/tx/",
+                    "TRX": "https://tronscan.org/#/transaction/"
                 }
 
-            # Blockchain API Keys
+            # ─────────────────────────────────────────────────────────────────
+            # Blockchain APIs
+            # ─────────────────────────────────────────────────────────────────
             cls._config[cls.ETHERSCAN_API_KEY] = os.getenv("ETHERSCAN_API_KEY")
             cls._config[cls.BSCSCAN_API_KEY] = os.getenv("BSCSCAN_API_KEY")
             cls._config[cls.TRON_API_KEY] = os.getenv("TRON_API_KEY")
 
-            # Channels (JSON format)
-            channels_str = os.getenv("REQUIRED_CHANNELS", "[]")
-            try:
-                cls._config[cls.REQUIRED_CHANNELS] = json.loads(channels_str)
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse REQUIRED_CHANNELS JSON: {e}")
-                cls._config[cls.REQUIRED_CHANNELS] = []
-
-            # Help & Settings - defaults (will be overridden by Google Sheets)
-            cls._config[cls.FAQ_URL] = ""
-            cls._config[cls.SOCIAL_LINKS] = {}
-            cls._config[cls.ADMIN_LINKS] = []
-
+            # ─────────────────────────────────────────────────────────────────
             # System
+            # ─────────────────────────────────────────────────────────────────
             cls._config[cls.SYSTEM_READY] = False
             cls._config[cls.BOT_USERNAME] = None
 
+            # Mark as initialized
             cls._initialized = True
-            logger.info("Configuration loaded from environment successfully")
+            logger.info("✓ Configuration loaded from .env")
 
         except Exception as e:
-            logger.error(f"Failed to load configuration: {e}")
-            raise ConfigurationError(f"Configuration loading failed: {e}")
-
-    @classmethod
-    def get_channels_by_lang(cls, lang: str) -> List[Dict[str, str]]:
-        """
-        Get required channels filtered by language.
-
-        Args:
-            lang: Language code (en, de, ru)
-
-        Returns:
-            List of channel dicts for specified language
-        """
-        all_channels = cls.get(cls.REQUIRED_CHANNELS, [])
-        return [ch for ch in all_channels if ch.get('lang') == lang]
-
-    @classmethod
-    async def validate_critical_keys(cls) -> None:
-        """
-        Validate that all critical configuration keys are present.
-
-        Raises:
-            ConfigurationError: If any critical key is missing
-        """
-        missing = []
-        for key in cls.CRITICAL_KEYS:
-            if not cls.get(key):
-                missing.append(key)
-
-        if missing:
-            error_msg = f"Missing critical configuration keys: {', '.join(missing)}"
-            logger.critical(error_msg)
-            raise ConfigurationError(error_msg)
-
-        logger.info("All critical configuration keys validated ✓")
+            logger.error(f"Failed to load configuration: {e}", exc_info=True)
+            raise ConfigurationError(f"Configuration initialization failed: {e}")
 
     @classmethod
     async def initialize_dynamic_from_sheets(cls) -> None:
         """
-        Load dynamic configuration and data from Google Sheets.
+        Load dynamic configuration from Google Sheets (Config tab).
 
-        This method:
-        1. Loads configuration variables from Config sheet
-        2. Imports Projects and Options data
-        3. Initializes StatsService for caching metrics
-
-        Merges with .env configuration, Google Sheets values take precedence.
-
-        Expected Config sheet format:
-        | key | value | description |
-
-        Raises:
-            ConfigurationError: If critical error occurs during loading
+        This loads values like:
+        - REQUIRED_CHANNELS
+        - RANK_CONFIG
+        - FAQ_URL
+        - SOCIAL_LINKS
+        - ADMIN_LINKS
         """
         try:
             from services.data_importer import ConfigImporter
-            from services.imports import import_projects_and_options
-            from services.stats_service import StatsService
-            from core.di import register_service
 
-            # ========================================================================
-            # STEP 1: Load configuration variables
-            # ========================================================================
             logger.info("Loading dynamic configuration from Google Sheets...")
-            config_dict = await ConfigImporter.import_config()
 
-            if not config_dict:
-                logger.warning("No configuration loaded from Google Sheets")
-                return
+            config_data = await ConfigImporter.import_config(
+                sheet_id=cls.get(cls.GOOGLE_SHEET_ID),
+                sheet_name="Config"
+            )
 
-            logger.info(f"Loaded {len(config_dict)} configuration variables from Google Sheets")
+            # Update config with loaded values
+            for key, value in config_data.items():
+                cls._config[key] = value
+                logger.debug(f"Loaded from sheets: {key}")
 
-            # Update known configuration keys
-            updates = []
-
-            if 'REQUIRED_CHANNELS' in config_dict:
-                cls.set(cls.REQUIRED_CHANNELS, config_dict['REQUIRED_CHANNELS'], source="sheets")
-                updates.append(f"REQUIRED_CHANNELS: {len(config_dict['REQUIRED_CHANNELS'])} channels")
-
-            if 'DEFAULT_REFERRER_ID' in config_dict:
-                cls.set(cls.DEFAULT_REFERRER_ID, config_dict['DEFAULT_REFERRER_ID'], source="sheets")
-                updates.append(f"DEFAULT_REFERRER_ID: {config_dict['DEFAULT_REFERRER_ID']}")
-
-            if 'STRATEGY_COEFFICIENTS' in config_dict:
-                cls.set(cls.STRATEGY_COEFFICIENTS, config_dict['STRATEGY_COEFFICIENTS'], source="sheets")
-                updates.append(f"STRATEGY_COEFFICIENTS: loaded")
-
-            if 'RANK_CONFIG' in config_dict:
-                cls.set(cls.RANK_CONFIG, config_dict['RANK_CONFIG'], source="sheets")
-                updates.append(f"RANK_CONFIG: {len(config_dict['RANK_CONFIG'])} ranks")
-
-            if 'INVESTMENT_BONUS_TIERS' in config_dict:
-                cls.set(cls.INVESTMENT_BONUS_TIERS, config_dict['INVESTMENT_BONUS_TIERS'], source="sheets")
-                updates.append(f"INVESTMENT_BONUS_TIERS: {len(config_dict['INVESTMENT_BONUS_TIERS'])} tiers")
-
-            if 'FAQ_URL' in config_dict:
-                cls.set(cls.FAQ_URL, config_dict['FAQ_URL'], source="sheets")
-                updates.append(f"FAQ_URL: {config_dict['FAQ_URL']}")
-
-            if 'SOCIAL_LINKS' in config_dict:
-                cls.set(cls.SOCIAL_LINKS, config_dict['SOCIAL_LINKS'], source="sheets")
-                updates.append(f"SOCIAL_LINKS: {len(config_dict['SOCIAL_LINKS'])} links")
-
-            if 'ADMIN_LINKS' in config_dict:
-                cls.set(cls.ADMIN_LINKS, config_dict['ADMIN_LINKS'], source="sheets")
-                updates.append(f"ADMIN_LINKS: {len(config_dict['ADMIN_LINKS'])} admins")
-
-            if 'WALLETS' in config_dict:
-                cls.set('WALLETS', config_dict['WALLETS'], source="sheets")
-                updates.append(f"WALLETS: {len(config_dict['WALLETS'])} configured")
-
-            if 'SECURE_EMAIL_DOMAINS' in config_dict:
-                cls.set('SECURE_EMAIL_DOMAINS', config_dict['SECURE_EMAIL_DOMAINS'], source="sheets")
-                updates.append(f"SECURE_EMAIL_DOMAINS: {config_dict['SECURE_EMAIL_DOMAINS']}")
-
-            for key, value in config_dict.items():
-                if key not in ['REQUIRED_CHANNELS', 'DEFAULT_REFERRER_ID', 'FAQ_URL',
-                               'SOCIAL_LINKS', 'ADMIN_LINKS', 'WALLETS', 'SECURE_EMAIL_DOMAINS',
-                               'STRATEGY_COEFFICIENTS']:
-                    cls.set(key, value, source="sheets")
-
-            if updates:
-                logger.info("Updated configuration from Google Sheets:")
-                for update in updates:
-                    logger.info(f"  - {update}")
-
-            logger.info("✓ Configuration variables loaded")
-
-            # ========================================================================
-            # STEP 2: Import Projects and Options
-            # ========================================================================
-            logger.info("Importing Projects and Options from Google Sheets...")
-            import_result = await import_projects_and_options()
-
-            if import_result["success"]:
-                logger.info(
-                    f"✓ Projects: "
-                    f"added={import_result['projects']['added']}, "
-                    f"updated={import_result['projects']['updated']}, "
-                    f"errors={import_result['projects']['errors']}"
-                )
-                logger.info(
-                    f"✓ Options: "
-                    f"added={import_result['options']['added']}, "
-                    f"updated={import_result['options']['updated']}, "
-                    f"errors={import_result['options']['errors']}"
-                )
-
-                # Log errors if any
-                if import_result["error_messages"]:
-                    logger.warning(f"Import errors: {len(import_result['error_messages'])}")
-                    for error_msg in import_result["error_messages"][:3]:
-                        logger.warning(f"  - {error_msg}")
-                    if len(import_result["error_messages"]) > 3:
-                        logger.warning(f"  ... and {len(import_result['error_messages']) - 3} more")
-            else:
-                logger.error("⚠️ Projects/Options import failed")
-                for error_msg in import_result["error_messages"][:5]:
-                    logger.error(f"  - {error_msg}")
-
-            # ========================================================================
-            # STEP 3: Initialize StatsService
-            # ========================================================================
-            logger.info("Initializing statistics service...")
-            stats_service = StatsService()
-            await stats_service.initialize()
-            register_service(StatsService, stats_service)
-            logger.info("✓ StatsService initialized and registered")
-
-            logger.info("=" * 60)
-            logger.info("✅ DYNAMIC CONFIGURATION LOADED SUCCESSFULLY")
-            logger.info("=" * 60)
+            logger.info(f"✓ Loaded {len(config_data)} configuration values from Google Sheets")
 
         except Exception as e:
-            logger.error(f"Failed to load dynamic configuration: {e}", exc_info=True)
-            logger.warning("⚠️ Continuing with .env configuration only")
-            # Don't raise - allow bot to start with basic configuration
+            logger.error(f"Failed to load configuration from Google Sheets: {e}")
+            # Non-critical error - continue with defaults
 
     @classmethod
     def get(cls, key: str, default: Any = None) -> Any:
         """
-        Get configuration value.
+        Get a static configuration value by key.
 
         Args:
             key: Configuration key
             default: Default value if key not found
 
         Returns:
-            Configuration value or default
+            The configuration value or default
+
+        Note:
+            For dynamic values (crypto_rates, statistics), use get_dynamic() instead.
         """
+        if not cls._initialized:
+            logger.warning(f"Config accessed before initialization: {key}")
+
         return cls._config.get(key, default)
 
     @classmethod
-    def set(cls, key: str, value: Any, source: str = "runtime") -> None:
+    def set(cls, key: str, value: Any) -> None:
         """
-        Set configuration value (for dynamic updates).
+        Set a static configuration value.
 
         Args:
             key: Configuration key
-            value: New value
-            source: Source of the update (for logging)
+            value: Configuration value
+
+        Note:
+            This sets static values only. For dynamic values, use register_dynamic().
         """
         cls._config[key] = value
-        logger.debug(f"Config updated: {key} = {value} (source: {source})")
+        logger.debug(f"Set config: {key}")
 
     @classmethod
-    def get_all(cls) -> Dict[str, Any]:
+    async def validate_critical_keys(cls) -> None:
         """
-        Get all configuration values.
+        Validate that all critical configuration keys are set.
 
-        Returns:
-            Copy of configuration dictionary
+        Raises:
+            ConfigurationError: If any critical key is missing or invalid
         """
-        return cls._config.copy()
+        missing = []
+
+        for key in cls.CRITICAL_KEYS:
+            value = cls.get(key)
+            if value is None or (isinstance(value, (list, dict)) and not value):
+                missing.append(key)
+
+        if missing:
+            error_msg = f"Missing critical configuration keys: {missing}"
+            logger.critical(error_msg)
+            raise ConfigurationError(error_msg)
+
+        logger.info("✓ All critical configuration keys are valid")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DYNAMIC CONFIGURATION METHODS
+    # ═══════════════════════════════════════════════════════════════════════
 
     @classmethod
-    def is_admin(cls, user_id: int) -> bool:
+    def register_dynamic(
+        cls,
+        key: str,
+        update_func: Callable,
+        interval: int = 300
+    ) -> None:
         """
-        Check if user is admin.
+        Register a dynamic value with auto-update.
 
         Args:
-            user_id: Telegram user ID
+            key: Configuration key (e.g., Config.CRYPTO_RATES)
+            update_func: Async or sync function that returns new value
+            interval: Update interval in seconds (default: 300 = 5 minutes)
+
+        Example:
+            Config.register_dynamic(
+                Config.CRYPTO_RATES,
+                get_crypto_rates,
+                interval=300
+            )
+        """
+        cls._update_functions[key] = update_func
+        cls._update_intervals[key] = interval
+        cls._is_updating[key] = False
+        cls._last_updates[key] = datetime.min.replace(tzinfo=timezone.utc)
+
+        logger.info(f"Registered dynamic value: {key} with {interval}s interval")
+
+    @classmethod
+    async def get_dynamic(cls, key: str, force_refresh: bool = False) -> Any:
+        """
+        Get a dynamic configuration value with auto-update check.
+
+        Args:
+            key: Configuration key (e.g., Config.CRYPTO_RATES)
+            force_refresh: Force immediate update regardless of TTL
 
         Returns:
-            True if user is admin
+            The current value or None if not available
+
+        Example:
+            rates = await Config.get_dynamic(Config.CRYPTO_RATES)
+            if rates:
+                btc_rate = rates.get('BTC')
         """
-        admin_ids = cls.get(cls.ADMIN_USER_IDS, [])
-        return user_id in admin_ids
+        # Check if value needs update
+        if force_refresh or cls._needs_update(key):
+            await cls._update_value(key)
+
+        return cls._dynamic_values.get(key)
+
+    @classmethod
+    def _needs_update(cls, key: str) -> bool:
+        """
+        Check if a dynamic value needs to be updated based on TTL.
+
+        Args:
+            key: Configuration key
+
+        Returns:
+            True if value is missing or TTL expired
+        """
+        # Value not set yet
+        if key not in cls._dynamic_values:
+            return True
+
+        # No update function registered
+        if key not in cls._update_intervals:
+            return False
+
+        # Check TTL
+        last_update = cls._last_updates.get(key, datetime.min.replace(tzinfo=timezone.utc))
+        interval = cls._update_intervals[key]
+        now = datetime.now(timezone.utc)
+
+        elapsed = (now - last_update).total_seconds()
+        needs_update = elapsed > interval
+
+        if needs_update:
+            logger.debug(f"Value {key} needs update (age: {elapsed:.1f}s, TTL: {interval}s)")
+
+        return needs_update
+
+    @classmethod
+    async def _update_value(cls, key: str) -> None:
+        """
+        Update a dynamic value by calling its update function.
+
+        Args:
+            key: Configuration key to update
+
+        Note:
+            This method is thread-safe and prevents concurrent updates
+            of the same key.
+        """
+        # No update function registered
+        if key not in cls._update_functions:
+            logger.warning(f"No update function for {key}")
+            return
+
+        # Already updating - skip
+        if cls._is_updating.get(key, False):
+            logger.debug(f"Update already in progress for {key}, skipping")
+            return
+
+        try:
+            cls._is_updating[key] = True
+            update_func = cls._update_functions[key]
+
+            logger.debug(f"Updating dynamic value: {key}")
+
+            # Call update function (may be async or sync)
+            result = update_func()
+
+            # If result is coroutine, await it
+            if asyncio.iscoroutine(result):
+                new_value = await result
+            else:
+                new_value = result
+
+            # Update value if not None
+            if new_value is not None:
+                cls._dynamic_values[key] = new_value
+                cls._last_updates[key] = datetime.now(timezone.utc)
+                logger.info(f"✓ Updated dynamic value: {key}")
+            else:
+                logger.warning(f"Update function for {key} returned None, keeping old value")
+
+        except Exception as e:
+            logger.error(f"Error updating dynamic value {key}: {e}", exc_info=True)
+
+        finally:
+            cls._is_updating[key] = False
+
+    @classmethod
+    async def refresh_all_dynamic(cls) -> None:
+        """
+        Force refresh all registered dynamic values immediately.
+
+        Useful during initialization or after configuration changes.
+        """
+        logger.info("Refreshing all dynamic values...")
+
+        for key in cls._update_functions.keys():
+            try:
+                await cls._update_value(key)
+            except Exception as e:
+                logger.error(f"Error refreshing {key}: {e}")
+
+        logger.info("✓ All dynamic values refreshed")
+
+    @classmethod
+    async def start_update_loop(cls) -> None:
+        """
+        Start the background update loop for dynamic values.
+
+        This should be called after all dynamic values are registered.
+        The loop will run until stop_update_loop() is called.
+        """
+        if cls._update_loop_running:
+            logger.warning("Update loop already running")
+            return
+
+        cls._update_loop_running = True
+        logger.info("Starting dynamic values update loop")
+
+        try:
+            while cls._update_loop_running:
+                # Update all values that need refreshing
+                for key in list(cls._update_functions.keys()):
+                    if cls._needs_update(key):
+                        try:
+                            await cls._update_value(key)
+                        except Exception as e:
+                            logger.error(f"Error in update loop for {key}: {e}")
+
+                # Sleep until next check (use minimum interval / 2)
+                if cls._update_intervals:
+                    min_interval = min(cls._update_intervals.values())
+                    sleep_time = min(60, min_interval / 2)  # Check at least every 60s
+                else:
+                    sleep_time = 60
+
+                await asyncio.sleep(sleep_time)
+
+        except asyncio.CancelledError:
+            logger.info("Update loop cancelled")
+        except Exception as e:
+            logger.error(f"Update loop error: {e}", exc_info=True)
+        finally:
+            cls._update_loop_running = False
+            logger.info("Update loop stopped")
+
+    @classmethod
+    def stop_update_loop(cls) -> None:
+        """
+        Stop the background update loop.
+
+        This should be called during bot shutdown.
+        """
+        cls._update_loop_running = False
+        if cls._update_loop_task:
+            cls._update_loop_task.cancel()
+            cls._update_loop_task = None
+        logger.info("Stopped dynamic values update loop")
+
+    @classmethod
+    def get_dynamic_info(cls) -> Dict[str, Dict[str, Any]]:
+        """
+        Get information about all dynamic values.
+
+        Returns:
+            Dictionary with details about each dynamic value:
+            {
+                'crypto_rates': {
+                    'value': {...},
+                    'last_update': datetime,
+                    'interval': 300,
+                    'age': 123.5,
+                    'needs_update': False
+                },
+                ...
+            }
+        """
+        result = {}
+        now = datetime.now(timezone.utc)
+
+        for key in cls._update_functions.keys():
+            last_update = cls._last_updates.get(key, datetime.min.replace(tzinfo=timezone.utc))
+            age = (now - last_update).total_seconds()
+            interval = cls._update_intervals.get(key, 0)
+
+            result[key] = {
+                'value': cls._dynamic_values.get(key),
+                'last_update': last_update,
+                'interval': interval,
+                'age': age,
+                'needs_update': cls._needs_update(key),
+                'is_updating': cls._is_updating.get(key, False)
+            }
+
+        return result
+
+
+# Export for convenience
+__all__ = ['Config', 'ConfigurationError']

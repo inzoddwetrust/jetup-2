@@ -139,35 +139,161 @@ async def show_welcome_screen(
     Flow:
     1. If EULA not accepted → show EULA screen
     2. If not subscribed to channels → show subscription prompt
-    3. Otherwise → show dashboard
+    3. If existing user → show dashboard with stats
+    4. If new user → show welcome screen
     """
-    # Check EULA acceptance
-    eula_accepted = auth_service.check_eula_accepted(user)
+    logger.info(f"show_welcome_screen for user {user.userID}")
 
-    if not eula_accepted:
-        logger.info(f"User {user.telegramID} needs to accept EULA")
-        await show_eula_screen(user, message_or_callback, message_manager)
+    # ========================================================================
+    # EULA CHECK
+    # ========================================================================
+    if not auth_service.is_eula_accepted(user):
+        logger.info(f"User {user.userID} needs to accept EULA")
+        await message_manager.send_template(
+            user=user,
+            template_key='eula_screen',
+            update=message_or_callback,
+            variables={'firstname': user.firstname or 'User'}
+        )
         return
 
-    # Check channel subscriptions
-    required_channels = Config.get(Config.REQUIRED_CHANNELS)
+    # ========================================================================
+    # CHANNEL SUBSCRIPTION CHECK
+    # ========================================================================
+    subscribed, not_subscribed_channels = await auth_service.check_channel_subscriptions(bot, user)
 
-    if required_channels:
-        subscribed, not_subscribed_channels = await auth_service.check_channel_subscriptions(bot, user)
+    if not subscribed:
+        logger.info(f"User {user.userID} not subscribed to {len(not_subscribed_channels)} channels")
 
-        if not subscribed:
-            logger.info(f"User {user.telegramID} not subscribed to {len(not_subscribed_channels)} channels")
-            await show_subscription_prompt(
-                user,
-                message_or_callback,
-                message_manager,
-                not_subscribed_channels
+        channels = [c['title'] for c in not_subscribed_channels]
+        urls = [c['url'] for c in not_subscribed_channels]
+
+        await message_manager.send_template(
+            user=user,
+            template_key='channel_missing',
+            update=message_or_callback,
+            variables={
+                'firstname': user.firstname or 'User',
+                'rgroup': {
+                    'channel': channels,
+                    'url': urls,
+                    'langChannel': channels
+                }
+            }
+        )
+        return
+
+    # ========================================================================
+    # GET GLOBAL STATISTICS (from Config dynamic values)
+    # ========================================================================
+    projects_count = await Config.get_dynamic(Config.PROJECTS_COUNT) or 0
+    users_count = await Config.get_dynamic(Config.USERS_COUNT) or 0
+    invested_total = await Config.get_dynamic(Config.INVESTED_TOTAL) or Decimal("0")
+
+    # Convert Decimal to float for template
+    purchases_total = float(invested_total)
+
+    # ========================================================================
+    # GET USER-SPECIFIC STATISTICS
+    # ========================================================================
+    stats_service = get_service(StatsService)
+
+    upline_count = 0
+    upline_total = 0
+    user_purchases_total = Decimal("0")
+
+    if stats_service:
+        try:
+            # Direct referrals
+            upline_count = await stats_service.get_user_referrals_count(
+                user.telegramID,
+                direct_only=True
             )
-            return
 
-    # All checks passed - show dashboard
-    logger.info(f"User {user.telegramID} passed all checks, showing dashboard")
-    await show_dashboard(user, message_or_callback, message_manager, session)
+            # All referrals (recursive)
+            upline_total = await stats_service.get_user_referrals_count(
+                user.telegramID,
+                direct_only=False
+            )
+
+            # User's total purchases
+            user_purchases_total = await stats_service.get_user_purchases_total(user.userID)
+
+        except Exception as e:
+            logger.error(f"Error getting user stats: {e}")
+
+    # ========================================================================
+    # MLM DATA
+    # ========================================================================
+    rank_display = "Старт"
+    monthly_pv = Decimal("0")
+
+    try:
+        rank_service = RankService(session)
+        active_rank = await rank_service.getUserActiveRank(user.userID)
+
+        # Get rank display name
+        try:
+            rank_enum = Rank(active_rank)
+            rank_config = RANK_CONFIG()
+            rank_display = rank_config.get(rank_enum, {}).get("displayName", active_rank)
+        except (ValueError, KeyError):
+            rank_display = active_rank
+
+        # Get monthly PV
+        if user.mlmVolumes:
+            monthly_pv = Decimal(str(user.mlmVolumes.get("monthlyPV", "0")))
+
+    except Exception as e:
+        logger.error(f"Error getting MLM data: {e}")
+
+    # ========================================================================
+    # DETERMINE TEMPLATE KEYS
+    # ========================================================================
+    template_keys = ['/dashboard/existingUser']
+
+    # Add additional template if user data not filled
+    if not user.isFilled:
+        template_keys.append('settings_unfilled_data')
+    elif user.isFilled and not user.emailConfirmed:
+        template_keys.append('settings_filled_unconfirmed')
+
+    # ========================================================================
+    # SEND DASHBOARD
+    # ========================================================================
+    await message_manager.send_template(
+        user=user,
+        template_key=template_keys,
+        update=message_or_callback,
+        variables={
+            # User info
+            'firstname': user.firstname or 'User',
+            'language': user.lang or 'en',
+            'email': user.email or '',
+
+            # Balances
+            'balanceActive': float(user.balanceActive or 0),
+            'balancePassive': float(user.balancePassive or 0),
+            'balance': float((user.balanceActive or 0) + (user.balancePassive or 0)),
+
+            # Global statistics
+            'projectsCount': projects_count,
+            'usersCount': users_count,
+            'purchasesTotal': purchases_total,
+
+            # User statistics
+            'userPurchasesTotal': float(user_purchases_total),
+            'uplineCount': upline_count,
+            'uplineTotal': upline_total,
+
+            # MLM data
+            'rank': rank_display,
+            'isActive': user.isActive,
+            'monthlyPV': float(monthly_pv),
+            'teamVolumeTotal': float(user.teamVolumeTotal or 0)
+        },
+        delete_original=isinstance(message_or_callback, CallbackQuery)
+    )
 
 
 async def show_eula_screen(

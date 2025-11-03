@@ -149,17 +149,31 @@ async def confirm_invoice(
     currency = callback_query.data.split("_")[1]
     user_data = await state.get_data()
 
-    # Get crypto rate from Config (loaded from Google Sheets)
+    # Get stablecoins list
     stablecoins = Config.get(Config.STABLECOINS, ["USDT-ERC20", "USDT-BSC20", "USDT-TRC20"])
 
     if currency in stablecoins:
         currency_rate = 1.0
     else:
-        # crypto_rates loaded from Google Sheets via StatsService
-        crypto_rates = Config.get('crypto_rates') or {}
+        # Get crypto rates (auto-updates if TTL expired)
+        crypto_rates = await Config.get_dynamic(Config.CRYPTO_RATES)
+
+        if not crypto_rates:
+            # Both APIs unavailable - block payments
+            logger.error("Crypto rates unavailable - both APIs failed")
+            await message_manager.send_template(
+                user=user,
+                template_key='add_balance_rate_error',
+                update=callback_query,
+                variables={'currency': currency},
+                edit=True
+            )
+            return
+
         currency_rate = crypto_rates.get(currency)
 
         if not currency_rate:
+            # Currency not in rates
             await message_manager.send_template(
                 user=user,
                 template_key='add_balance_rate_error',

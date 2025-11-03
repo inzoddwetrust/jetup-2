@@ -20,6 +20,13 @@ from core.system_services import (
     start_bot_polling,
     setup_signal_handlers
 )
+from utils.crypto_rates import get_crypto_rates
+from services.stats_service import (
+            update_users_count,
+            update_projects_count,
+            update_invested_total,
+            update_sorted_projects
+        )
 from handlers import register_all_handlers
 
 # Configure logging
@@ -73,11 +80,61 @@ async def initialize_bot():
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("📥 Loading dynamic configuration from Google Sheets...")
         await Config.initialize_dynamic_from_sheets()
+        logger.info("✓ Dynamic configuration loaded")
 
-        # ========================================================================
-        # STEP 3.5: Initialize EmailService
-        # ========================================================================
-        logger.info("Initializing email service...")
+        # ═══════════════════════════════════════════════════════════════════════
+        # STEP 3.7: Register dynamic values (crypto rates, statistics)
+        # ═══════════════════════════════════════════════════════════════════════
+        logger.info("📊 Registering dynamic values...")
+
+        # Register crypto rates (5 min TTL)
+        Config.register_dynamic(
+            Config.CRYPTO_RATES,
+            get_crypto_rates,
+            interval=300
+        )
+
+        # Register statistics (various TTLs)
+        Config.register_dynamic(
+            Config.USERS_COUNT,
+            update_users_count,
+            interval=600  # 10 minutes
+        )
+
+        Config.register_dynamic(
+            Config.PROJECTS_COUNT,
+            update_projects_count,
+            interval=3600  # 1 hour
+        )
+
+        Config.register_dynamic(
+            Config.INVESTED_TOTAL,
+            update_invested_total,
+            interval=300  # 5 minutes
+        )
+
+        Config.register_dynamic(
+            Config.SORTED_PROJECTS,
+            update_sorted_projects,
+            interval=3600  # 1 hour
+        )
+
+        logger.info("✓ Dynamic values registered")
+
+        # First update of all dynamic values
+        logger.info("🔄 Initial update of dynamic values...")
+        await Config.refresh_all_dynamic()
+        logger.info("✓ Dynamic values initialized")
+
+        # Start background update loop
+        logger.info("♻️ Starting dynamic values update loop...")
+        Config._update_loop_task = asyncio.create_task(Config.start_update_loop())
+        logger.info("✓ Update loop started")
+
+        # ════════════════════════════════════════════════════════════════════════
+        # STEP 3.8: Initialize EmailService
+        # ════════════════════════════════════════════════════════════════════════
+        logger.info("📧 Initializing email service...")
         from email_system import EmailService
         email_service = EmailService()
         await email_service.initialize()

@@ -15,7 +15,7 @@ from models.project import Project
 from models.option import Option
 from core.message_manager import MessageManager
 from core.user_decorator import with_user
-from services.stats_service import StatsService
+from config import Config
 from core.di import get_service
 from states.fsm_states import ProjectCarouselState
 
@@ -80,15 +80,16 @@ async def start_carousel(
         state: FSMContext
 ):
     """Start project carousel from the first project."""
+    logger.info(f"User {user.userID} opened projects carousel")
+
     # Delete previous message if exists
     try:
         await callback_query.message.delete()
     except Exception:
         pass
 
-    # Get sorted projects from StatsService
-    stats_service = get_service(StatsService)
-    sorted_projects = await stats_service.get_sorted_projects() if stats_service else []
+    # Get sorted projects from Config dynamic values
+    sorted_projects = await Config.get_dynamic(Config.SORTED_PROJECTS)
 
     if not sorted_projects:
         await message_manager.send_template(
@@ -145,9 +146,8 @@ async def move_project(
     user_data = await state.get_data()
     current_project_id = user_data.get('current_project_id', 0)
 
-    # Get sorted projects
-    stats_service = get_service(StatsService)
-    sorted_projects = await stats_service.get_sorted_projects() if stats_service else []
+    # Get sorted projects from Config dynamic values
+    sorted_projects = await Config.get_dynamic(Config.SORTED_PROJECTS)
 
     if not sorted_projects:
         await callback_query.answer("No projects available")

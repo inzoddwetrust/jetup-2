@@ -1,15 +1,16 @@
-# jetup/services/stats_service.py
+# jetup-2/services/stats_service.py
 """
-Statistics service - modern replacement for GlobalVariables.
-Caches and updates bot statistics.
+Statistics service with update functions for Config dynamic values.
+
+Global statistics (users, projects, invested total) are managed by Config.get_dynamic().
+This service provides user-specific statistics and update functions.
 """
 import logging
-from typing import Any, Dict
+from typing import List
 from decimal import Decimal
-from datetime import datetime
 from sqlalchemy import func
 
-from core.db import get_session
+from core.db import get_db_session_ctx
 from models.user import User
 from models.project import Project
 from models.purchase import Purchase
@@ -17,60 +18,130 @@ from models.purchase import Purchase
 logger = logging.getLogger(__name__)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# GLOBAL STATISTICS UPDATE FUNCTIONS (for Config.register_dynamic)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def update_users_count() -> int:
+    """
+    Get total number of registered users.
+
+    Returns:
+        Total user count
+
+    Usage:
+        Config.register_dynamic(Config.USERS_COUNT, update_users_count, 600)
+    """
+    with get_db_session_ctx() as session:
+        count = session.query(func.count(User.userID)).scalar() or 0
+        logger.debug(f"Updated users_count: {count}")
+        return count
+
+
+def update_projects_count() -> int:
+    """
+    Get number of active projects (status: active or child).
+
+    Returns:
+        Active projects count (distinct projectID)
+
+    Usage:
+        Config.register_dynamic(Config.PROJECTS_COUNT, update_projects_count, 3600)
+    """
+    with get_db_session_ctx() as session:
+        count = session.query(
+            func.count(func.distinct(Project.projectID))
+        ).filter(
+            Project.status.in_(["active", "child"])
+        ).scalar() or 0
+
+        logger.debug(f"Updated projects_count: {count}")
+        return count
+
+
+def update_invested_total() -> Decimal:
+    """
+    Get total investment amount (sum of all purchases).
+
+    Returns:
+        Total invested amount as Decimal
+
+    Usage:
+        Config.register_dynamic(Config.INVESTED_TOTAL, update_invested_total, 300)
+    """
+    with get_db_session_ctx() as session:
+        total = session.query(func.sum(Purchase.packPrice)).scalar()
+
+        if total is None:
+            total = Decimal("0")
+        else:
+            # Ensure it's Decimal (PostgreSQL returns Decimal, but just in case)
+            total = Decimal(str(total))
+
+        logger.debug(f"Updated invested_total: {total}")
+        return total
+
+
+def update_sorted_projects() -> List[int]:
+    """
+    Get list of project IDs sorted by rate field.
+
+    Projects with lower rate appear first.
+    Groups by projectID (multiple language versions have same projectID).
+
+    Returns:
+        List of project IDs in order
+
+    Usage:
+        Config.register_dynamic(Config.SORTED_PROJECTS, update_sorted_projects, 3600)
+    """
+    with get_db_session_ctx() as session:
+        # Get projects sorted by rate
+        # group_by projectID to get unique projects (lang versions have same projectID)
+        # order by MIN rate among language versions
+        projects = session.query(Project.projectID).filter(
+            Project.status.in_(["active", "child"])
+        ).group_by(Project.projectID).order_by(
+            func.min(func.coalesce(Project.rate, 999))  # NULL rates go last
+        ).all()
+
+        project_ids = [pid for (pid,) in projects]
+        logger.debug(f"Updated sorted_projects: {len(project_ids)} projects")
+        return project_ids
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# USER-SPECIFIC STATISTICS (StatsService class)
+# ═══════════════════════════════════════════════════════════════════════════
+
 class StatsService:
     """
-    Service for managing and caching bot statistics.
+    Service for user-specific statistics.
+
+    For global statistics (users count, projects count, etc.),
+    use Config.get_dynamic() instead.
 
     Usage:
         stats_service = get_service(StatsService)
-        users_count = await stats_service.get_users_count()
+        referrals = await stats_service.get_user_referrals_count(telegram_id)
     """
 
-    def __init__(self):
-        self._cache: Dict[str, Any] = {}
-        self._cache_timestamps: Dict[str, datetime] = {}
-        self._cache_ttl: Dict[str, int] = {
-            'users_count': 300,  # 5 minutes
-            'projects_count': 3600,  # 1 hour
-            'purchases_total': 100,  # 100 seconds
-            'sorted_projects': 3600,  # 1 hour
-        }
-
-    async def initialize(self):
-        """Initialize service and preload cache."""
-        logger.info("Initializing StatsService...")
-        await self.refresh_all()
-        logger.info("StatsService initialized")
-
-    async def get_users_count(self) -> int:
-        """Get total number of users."""
-        return await self._get_cached('users_count', self._fetch_users_count)
-
-    async def get_projects_count(self) -> int:
-        """Get number of active projects."""
-        return await self._get_cached('projects_count', self._fetch_projects_count)
-
-    async def get_purchases_total(self) -> float:
-        """Get total purchases amount."""
-        return await self._get_cached('purchases_total', self._fetch_purchases_total)
-
-    async def get_sorted_projects(self) -> list:
-        """Get list of project IDs sorted by rate."""
-        return await self._get_cached('sorted_projects', self._fetch_sorted_projects)
-
-    async def get_user_referrals_count(self, telegram_id: int, direct_only: bool = True) -> int:
+    async def get_user_referrals_count(
+            self,
+            telegram_id: int,
+            direct_only: bool = True
+    ) -> int:
         """
         Get number of referrals for user.
 
         Args:
             telegram_id: User's Telegram ID
-            direct_only: If True, count only direct referrals
+            direct_only: If True, count only direct referrals (level 1)
 
         Returns:
             Number of referrals
         """
-        session = get_session()
-        try:
+        with get_db_session_ctx() as session:
             if direct_only:
                 count = session.query(func.count(User.userID)).filter(
                     User.upline == telegram_id
@@ -80,123 +151,110 @@ class StatsService:
                 count = self._count_all_referrals_recursive(session, telegram_id)
 
             return count
-        finally:
-            session.close()
 
     async def get_user_purchases_total(self, user_id: int) -> Decimal:
-        """Get total purchases amount for user."""
-        session = get_session()
-        try:
+        """
+        Get total purchases amount for specific user.
+
+        Args:
+            user_id: User's internal ID (not telegram ID)
+
+        Returns:
+            Total purchase amount as Decimal
+        """
+        with get_db_session_ctx() as session:
             total = session.query(func.sum(Purchase.packPrice)).filter(
                 Purchase.userID == user_id
-            ).scalar() or Decimal("0")
+            ).scalar()
+
+            if total is None:
+                return Decimal("0")
 
             return Decimal(str(total))
-        finally:
-            session.close()
 
-    async def refresh_all(self):
-        """Refresh all cached statistics."""
-        logger.info("Refreshing all statistics...")
+    async def get_user_active_downline_count(self, telegram_id: int) -> int:
+        """
+        Get count of active downline members (who made at least one purchase).
 
-        await self._fetch_users_count(force=True)
-        await self._fetch_projects_count(force=True)
-        await self._fetch_purchases_total(force=True)
-        await self._fetch_sorted_projects(force=True)
+        Args:
+            telegram_id: User's Telegram ID
 
-        logger.info("All statistics refreshed")
+        Returns:
+            Count of active downline members
+        """
+        with get_db_session_ctx() as session:
+            # Get all downline user IDs
+            downline_ids = self._get_all_downline_ids(session, telegram_id)
 
-    # ========================================================================
-    # PRIVATE METHODS
-    # ========================================================================
+            if not downline_ids:
+                return 0
 
-    async def _get_cached(self, key: str, fetch_func):
-        """Get value from cache or fetch if expired."""
-        now = datetime.utcnow()
-
-        # Check if cached and not expired
-        if key in self._cache and key in self._cache_timestamps:
-            age = (now - self._cache_timestamps[key]).total_seconds()
-            ttl = self._cache_ttl.get(key, 300)
-
-            if age < ttl:
-                return self._cache[key]
-
-        # Fetch new value
-        value = await fetch_func()
-        self._cache[key] = value
-        self._cache_timestamps[key] = now
-
-        return value
-
-    async def _fetch_users_count(self, force: bool = False) -> int:
-        """Fetch total users count from database."""
-        session = get_session()
-        try:
-            count = session.query(func.count(User.userID)).scalar() or 0
-            logger.debug(f"Users count: {count}")
-            return count
-        finally:
-            session.close()
-
-    async def _fetch_projects_count(self, force: bool = False) -> int:
-        """Fetch active projects count."""
-        session = get_session()
-        try:
-            count = session.query(
-                func.count(func.distinct(Project.projectID))
-            ).filter(
-                Project.status.in_(["active", "child"])
+            # Count how many have purchases
+            active_count = session.query(func.count(func.distinct(Purchase.userID))).filter(
+                Purchase.userID.in_(downline_ids)
             ).scalar() or 0
 
-            logger.debug(f"Projects count: {count}")
-            return count
-        finally:
-            session.close()
+            return active_count
 
-    async def _fetch_purchases_total(self, force: bool = False) -> float:
-        """Fetch total purchases amount."""
-        session = get_session()
-        try:
-            total = session.query(func.sum(Purchase.packPrice)).scalar() or 0
-            logger.debug(f"Purchases total: {total}")
-            return float(total)
-        finally:
-            session.close()
+    # ═══════════════════════════════════════════════════════════════════════
+    # PRIVATE HELPER METHODS
+    # ═══════════════════════════════════════════════════════════════════════
 
-    async def _fetch_sorted_projects(self, force: bool = False) -> list:
-        """Fetch project IDs sorted by rate."""
-        session = get_session()
-        try:
-            projects = session.query(Project.projectID).filter(
-                Project.status.in_(["active", "child"])
-            ).group_by(Project.projectID).order_by(
-                func.min(func.coalesce(Project.rate, 999))
-            ).all()
+    def _count_all_referrals_recursive(self, session, telegram_id: int) -> int:
+        """
+        Recursively count all downline referrals.
 
-            project_ids = [pid for (pid,) in projects]
-            logger.debug(f"Sorted projects: {len(project_ids)} projects")
-            return project_ids
-        finally:
-            session.close()
+        Args:
+            session: Database session
+            telegram_id: User's Telegram ID
 
-    def _count_all_referrals_recursive(self, session, telegram_id: int, visited: set = None) -> int:
-        """Recursively count all referrals in downline."""
-        if visited is None:
-            visited = set()
+        Returns:
+            Total count of all levels
+        """
+        count = 0
 
-        if telegram_id in visited:
-            return 0
-
-        visited.add(telegram_id)
-
-        referrals = session.query(User.telegramID).filter(
+        # Get direct referrals
+        direct_refs = session.query(User.telegramID).filter(
             User.upline == telegram_id
         ).all()
 
-        total = 0
-        for (ref_id,) in referrals:
-            if ref_id not in visited:
-                total += 1 + self._count_all_referrals_recursive(session, ref_id, visited)
+        for (ref_id,) in direct_refs:
+            count += 1  # Count this referral
+            count += self._count_all_referrals_recursive(session, ref_id)  # Count their downline
 
-        return total
+        return count
+
+    def _get_all_downline_ids(self, session, telegram_id: int) -> List[int]:
+        """
+        Get all downline user IDs recursively.
+
+        Args:
+            session: Database session
+            telegram_id: User's Telegram ID
+
+        Returns:
+            List of user IDs (internal IDs, not telegram IDs)
+        """
+        result = []
+
+        # Get direct referrals
+        direct_refs = session.query(User.userID, User.telegramID).filter(
+            User.upline == telegram_id
+        ).all()
+
+        for user_id, ref_telegram_id in direct_refs:
+            result.append(user_id)
+            # Recursively get their downline
+            result.extend(self._get_all_downline_ids(session, ref_telegram_id))
+
+        return result
+
+
+# Export
+__all__ = [
+    'update_users_count',
+    'update_projects_count',
+    'update_invested_total',
+    'update_sorted_projects',
+    'StatsService'
+]
