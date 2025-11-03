@@ -429,7 +429,16 @@ class CommissionService:
             commission: Dict,
             purchase: Purchase
     ):
-        """Save commission to database as Bonus and update PassiveBalance."""
+        """
+        Save commission to database as Bonus with PENDING status.
+
+        Commission will be paid on 5th of next month by processMonthlyPayments().
+        Creates notification to inform user about pending commission.
+        """
+        from models import Notification
+        from core.templates import MessageTemplates
+
+        # Create Bonus record
         bonus = Bonus()
         bonus.userID = commission["userId"]
         bonus.downlineID = purchase.userID
@@ -460,7 +469,8 @@ class CommissionService:
             bonus.commissionType = "differential"
             bonus.notes = "Differential commission"
 
-        bonus.status = "paid"
+        # ✅ CHANGED: Status is now PENDING (not paid immediately)
+        bonus.status = "pending"
 
         # AuditMixin
         user = self.session.query(User).filter_by(userID=commission["userId"]).first()
@@ -471,19 +481,70 @@ class CommissionService:
         self.session.add(bonus)
         self.session.flush()
 
-        # Update PassiveBalance
-        if not commission.get("isSystemRoot"):
-            # Regular user commission → PassiveBalance
-            await self._updatePassiveBalance(
-                commission["userId"],
-                commission["amount"],
-                bonus.bonusID
-            )
-        else:
-            # System commission → recorded but not added to user balance
+        # ═══════════════════════════════════════════════════════════
+        # System commission (root user) - no notification needed
+        # ═══════════════════════════════════════════════════════════
+        if commission.get("isSystemRoot"):
             logger.info(
                 f"System commission ${commission['amount']} recorded "
-                f"for root user {commission['userId']} (bonusID={bonus.bonusID})"
+                f"for root user {commission['userId']} (bonusID={bonus.bonusID}, status=pending)"
+            )
+            return
+
+        # ═══════════════════════════════════════════════════════════
+        # ✅ NEW: Create PENDING notification for user
+        # ═══════════════════════════════════════════════════════════
+        try:
+            from mlm_system.utils.time_machine import timeMachine
+
+            # Calculate next payment date (5th of next month)
+            current_month = timeMachine.currentMonth  # e.g. "2025-01"
+            year, month = map(int, current_month.split('-'))
+            next_month = month + 1
+            next_year = year
+            if next_month > 12:
+                next_month = 1
+                next_year += 1
+            payment_date = f"{next_year}-{next_month:02d}-05"
+
+            # Get template
+            text, buttons = await MessageTemplates.get_raw_template(
+                '/mlm/differential_commission_pending',
+                {
+                    'bonus_amount': float(commission["amount"]),
+                    'level': commission["level"],
+                    'purchase_amount': float(purchase.packPrice),
+                    'payment_date': payment_date,
+                    'downline_name': purchase.user.firstname
+                },
+                lang=user.lang or 'en'
+            )
+
+            # Create notification
+            notification = Notification(
+                source="mlm_system",
+                text=text,
+                buttons=buttons,
+                target_type="user",
+                target_value=str(commission["userId"]),
+                priority=2,
+                category="mlm",
+                importance="medium",
+                parse_mode="HTML"
+            )
+
+            self.session.add(notification)
+
+            logger.info(
+                f"✓ Pending commission notification created for user {commission['userId']}: "
+                f"${commission['amount']} (bonusID={bonus.bonusID})"
+            )
+
+        except Exception as notif_error:
+            # Don't fail commission creation if notification fails
+            logger.error(
+                f"Failed to create pending notification for bonus {bonus.bonusID}: {notif_error}",
+                exc_info=True
             )
 
     async def _updatePassiveBalance(

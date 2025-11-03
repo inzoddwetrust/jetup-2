@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 import logging
 import json
 
-from models import User, GlobalPool, Bonus, MonthlyStats
+from models import User, GlobalPool, Bonus, MonthlyStats, PassiveBalance
 from mlm_system.config.ranks import GLOBAL_POOL_PERCENTAGE
 from mlm_system.utils.time_machine import timeMachine
 from mlm_system.services.volume_service import VolumeService
@@ -152,6 +152,8 @@ class GlobalPoolService:
         """
         Distribute Global Pool to qualified users.
         Called on 5th of each month.
+
+        ✅ FIXED: Now creates PassiveBalance transaction records for audit trail.
         """
         currentMonth = timeMachine.currentMonth
 
@@ -178,7 +180,6 @@ class GlobalPoolService:
                 "total": Decimal("0")
             }
 
-        # Parse qualified users
         qualifiedUserIds = json.loads(pool.qualifiedUsers or "[]")
 
         distributed = 0
@@ -190,7 +191,9 @@ class GlobalPoolService:
                 logger.error(f"User {userId} not found for Global Pool distribution")
                 continue
 
-            # Create bonus record
+            # ═══════════════════════════════════════════════════════════
+            # STEP 1: Create Bonus record with PENDING status
+            # ═══════════════════════════════════════════════════════════
             bonus = Bonus()
             bonus.userID = userId
             bonus.downlineID = None  # No specific downline for Global Pool
@@ -202,7 +205,8 @@ class GlobalPoolService:
             bonus.bonusAmount = pool.perUserAmount
             bonus.compressionApplied = 0
 
-            bonus.status = "paid"
+            # ✅ CHANGED: Status is PENDING (paid on 5th of next month)
+            bonus.status = "pending"
             bonus.notes = f"Global Pool for {currentMonth}"
 
             # Owner fields
@@ -210,11 +214,11 @@ class GlobalPoolService:
             bonus.ownerEmail = user.email
 
             self.session.add(bonus)
+            self.session.flush()  # Get bonus.bonusID for notification
 
-            # Update user's passive balance
-            user.balancePassive = (user.balancePassive or Decimal("0")) + pool.perUserAmount
-
-            # Update monthly stats if exists
+            # ═══════════════════════════════════════════════════════════
+            # STEP 2: Update monthly stats (for tracking only)
+            # ═══════════════════════════════════════════════════════════
             monthlyStats = self.session.query(MonthlyStats).filter_by(
                 userID=userId,
                 month=currentMonth
@@ -223,11 +227,68 @@ class GlobalPoolService:
             if monthlyStats:
                 monthlyStats.globalPoolEarned = pool.perUserAmount
 
+            # ═══════════════════════════════════════════════════════════
+            # STEP 3: Create PENDING notification for user
+            # ═══════════════════════════════════════════════════════════
+            try:
+                from models.notification import Notification
+                from core.templates import MessageTemplates
+
+                # Calculate payment date (5th of next month)
+                year, month = map(int, currentMonth.split('-'))
+                next_month = month + 1
+                next_year = year
+                if next_month > 12:
+                    next_month = 1
+                    next_year += 1
+                payment_date = f"{next_year}-{next_month:02d}-05"
+
+                # Get template
+                text, buttons = await MessageTemplates.get_raw_template(
+                    '/mlm/global_pool_pending',
+                    {
+                        'bonus_amount': float(pool.perUserAmount),
+                        'month': currentMonth,
+                        'payment_date': payment_date,
+                        'pool_size': float(pool.poolSize),
+                        'qualified_count': pool.qualifiedUsersCount
+                    },
+                    lang=user.lang or 'en'
+                )
+
+                # Create notification
+                notification = Notification(
+                    source="mlm_system",
+                    text=text,
+                    buttons=buttons,
+                    target_type="user",
+                    target_value=str(userId),
+                    priority=2,
+                    category="mlm",
+                    importance="high",
+                    parse_mode="HTML"
+                )
+
+                self.session.add(notification)
+
+                logger.info(
+                    f"✓ Pending Global Pool notification created for user {userId}: "
+                    f"${pool.perUserAmount} (bonusID={bonus.bonusID})"
+                )
+
+            except Exception as notif_error:
+                # Don't fail pool distribution if notification fails
+                logger.error(
+                    f"Failed to create pending notification for user {userId}: {notif_error}",
+                    exc_info=True
+                )
+
             distributed += 1
             totalDistributed += pool.perUserAmount
 
             logger.info(
-                f"Global Pool {pool.perUserAmount} distributed to user {userId}"
+                f"✓ Global Pool bonus created (pending) for user {userId}: "
+                f"${pool.perUserAmount} (bonusID={bonus.bonusID})"
             )
 
         # Update pool status
@@ -237,8 +298,8 @@ class GlobalPoolService:
         self.session.commit()
 
         logger.info(
-            f"Global Pool distribution complete: "
-            f"distributed={distributed}, total={totalDistributed}"
+            f"Global Pool distribution complete (pending): "
+            f"distributed={distributed}, total=${totalDistributed}"
         )
 
         return {
