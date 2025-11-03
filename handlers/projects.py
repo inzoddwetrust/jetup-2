@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram import Router, F, Bot
 from sqlalchemy.orm import Session
+from sqlalchemy import case
 from decimal import Decimal
 
 from models.user import User
@@ -32,6 +33,9 @@ async def get_project_by_id(session: Session, project_id: int, user_lang: str) -
     """
     Get project by ID with language fallback and status check.
 
+    Optimized: Single query instead of two sequential queries.
+    Uses IN clause with ORDER BY for language priority.
+
     Args:
         session: Database session
         project_id: Project ID
@@ -40,30 +44,17 @@ async def get_project_by_id(session: Session, project_id: int, user_lang: str) -
     Returns:
         Project instance or None if not found/inactive
     """
-    # Try user's language first
+    # Single query with language fallback and status check
+    # ORDER BY with CASE ensures user's language is preferred
     project = session.query(Project).filter(
         Project.projectID == project_id,
-        Project.lang == user_lang
+        Project.lang.in_([user_lang, 'en']),
+        Project.status.in_(['active', 'child'])
+    ).order_by(
+        case((Project.lang == user_lang, 0), else_=1)
     ).first()
 
-    # Check status
-    if project:
-        if project.status in ['active', 'child']:
-            return project
-        else:
-            return None  # Project is disabled
-
-    # Fallback to English
-    project = session.query(Project).filter(
-        Project.projectID == project_id,
-        Project.lang == 'en'
-    ).first()
-
-    # Check status of English version
-    if project and project.status in ['active', 'child']:
-        return project
-
-    return None
+    return project
 
 
 # ============================================================================
@@ -110,8 +101,12 @@ async def start_carousel(
         )
         return
 
-    # Save current project to state
-    await state.update_data(current_project_id=first_project_id)
+    # Save current project, index, and full list to state (optimization)
+    await state.update_data(
+        current_project_id=first_project_id,
+        current_index=0,
+        sorted_projects=sorted_projects
+    )
     await state.set_state(ProjectCarouselState.current_project_index)
 
     # Send project card
@@ -140,28 +135,40 @@ async def move_project(
         message_manager: MessageManager,
         state: FSMContext
 ):
-    """Navigate through projects (forward/backward)."""
+    """
+    Navigate through projects (forward/backward).
+
+    Optimized: Uses cached index and project list from state,
+    avoiding O(n) list.index() lookup and repeated StatsService calls.
+    """
     step = int(callback_query.data.split("_")[1])
     user_data = await state.get_data()
-    current_project_id = user_data.get('current_project_id', 0)
 
-    # Get sorted projects
-    stats_service = get_service(StatsService)
-    sorted_projects = await stats_service.get_sorted_projects() if stats_service else []
+    # Get cached data (optimization)
+    current_index = user_data.get('current_index')
+    sorted_projects = user_data.get('sorted_projects')
 
-    if not sorted_projects:
-        await callback_query.answer("No projects available")
-        return
+    # Fallback: if cache is missing, fetch fresh data
+    if current_index is None or not sorted_projects:
+        logger.warning("Cache miss in move_project, fetching fresh data")
+        stats_service = get_service(StatsService)
+        sorted_projects = await stats_service.get_sorted_projects() if stats_service else []
 
-    try:
-        # Calculate new index (circular navigation)
-        current_index = sorted_projects.index(current_project_id)
-        new_index = (current_index + step) % len(sorted_projects)
-        new_project_id = sorted_projects[new_index]
-    except ValueError:
-        await callback_query.answer("Error: Project not found")
-        logger.error(f"Project {current_project_id} not in sorted list")
-        return
+        if not sorted_projects:
+            await callback_query.answer("No projects available")
+            return
+
+        # Try to find current position
+        current_project_id = user_data.get('current_project_id', 0)
+        try:
+            current_index = sorted_projects.index(current_project_id)
+        except ValueError:
+            current_index = 0
+            logger.error(f"Project {current_project_id} not found, resetting to first")
+
+    # Calculate new index (circular navigation) - O(1) operation
+    new_index = (current_index + step) % len(sorted_projects)
+    new_project_id = sorted_projects[new_index]
 
     # Get new project
     project = await get_project_by_id(session, new_project_id, user.lang or 'en')
@@ -170,8 +177,12 @@ async def move_project(
         await callback_query.answer("Error: Project not found")
         return
 
-    # Update state
-    await state.update_data(current_project_id=new_project_id)
+    # Update state with new index and project_id
+    await state.update_data(
+        current_project_id=new_project_id,
+        current_index=new_index,
+        sorted_projects=sorted_projects
+    )
 
     # Update message
     try:
@@ -254,9 +265,24 @@ async def back_to_specific_project(
 ):
     """Return to specific project from details view."""
     project_id = int(callback_query.data.split("_")[-1])
+    user_data = await state.get_data()
 
-    # Update state
-    await state.update_data(current_project_id=project_id)
+    # Get cached project list (optimization)
+    sorted_projects = user_data.get('sorted_projects')
+
+    # Calculate index for the project we're returning to
+    current_index = None
+    if sorted_projects:
+        try:
+            current_index = sorted_projects.index(project_id)
+        except ValueError:
+            logger.warning(f"Project {project_id} not in cached list")
+
+    # Update state with index
+    await state.update_data(
+        current_project_id=project_id,
+        current_index=current_index if current_index is not None else 0
+    )
     await state.set_state(ProjectCarouselState.current_project_index)
 
     # Get project
