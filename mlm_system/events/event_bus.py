@@ -83,5 +83,8 @@ class MLMEvents:
     GLOBAL_POOL_CALCULATED = "global_pool.calculated"
     GLOBAL_POOL_DISTRIBUTED = "global_pool.distributed"
 
+    # ✅ ADDED: Event for 5th of month payment processing
+    PAYMENTS_PROCESSED = "payments.processed"
+
     PIONEER_BONUS_GRANTED = "pioneer_bonus.granted"
     REFERRAL_BONUS_PAID = "referral_bonus.paid"
