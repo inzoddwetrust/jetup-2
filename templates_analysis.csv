@@ -1,0 +1,24 @@
+#,stateKey,lang,text,buttons,parseMode,disablePreview,mediaType,mediaID,
+1,/dashboard/newUser,ru,"👋 <b>Здравствуйте, {firstname}!</b>
+
+Прежде чем начать, пожалуйста, ознакомьтесь с <b>правилами платформы</b>:
+
+После этого нажмите <b>«Я принимаю»</b>, чтобы продолжить.
+","|webapp|library.jetup.info/books/doc-ru:Изучить правила 📖
+/acceptEula:Я принимаю правила ✅
+lang_en:🇬🇧; lang_de:🇩🇪; lang_ru:🇷🇺;",HTML,1,picture,AgACAgIAAxkBAAIhZGgQ1VwKtYAtxmICU3CLp4znSTkqAAL27zEb-CGJSNMRqsirJpwIAQADAgADeQADNgQ,
+1,/dashboard/newUser,en,"👋 <b>Hello, {firstname}!</b>
+
+Before we get started, please read the <b>platform rules</b>:
+
+Then tap <b>"I accept"</b> to continue.
+","|webapp|library.jetup.info/books/doc-en:Learn the rules 🔎
+/acceptEula:I accept the rules ✅
+lang_en:🇬🇧; lang_de:🇩🇪; lang_ru:🇷🇺;",HTML,1,picture,AgACAgIAAxkBAAIhZGgQ1VwKtYAtxmICU3CLp4znSTkqAAL27zEb-CGJSNMRqsirJpwIAQADAgADeQADNgQ,
+1,/dashboard/newUser,de,"👋 <b>Hallo, {firstname}!</b>
+
+Bevor wir starten, lies bitte die <b>Plattform-Regeln</b>:
+
+Tippe anschließend auf <b>„Ich akzeptiere"</b>, um fortzufahren.","|webapp|library.jetup.info/books/doc-de:Lerne die Regeln 🔎
+/acceptEula:Ich akzeptiere die Regeln ✅
+lang_en:🇬🇧; lang_de:🇩🇪; lang_ru:🇷🇺;",HTML,1,picture,AgACAgIAAxkBAAIhZGgQ1VwKtYAtxmICU3CLp4znSTkqAAL27zEb-CGJSNMRqsirJpwIAQADAgADeQADNgQ,
