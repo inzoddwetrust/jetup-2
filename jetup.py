@@ -176,6 +176,24 @@ async def initialize_bot():
         logger.info("✓ Resources loaded")
 
         # ═══════════════════════════════════════════════════════════════════════
+        # STEP 6.5: Verify templates
+        # ═══════════════════════════════════════════════════════════════════════
+        logger.info("🔍 Verifying templates...")
+        from core.template_verifier import TemplateVerifier
+        verifier = TemplateVerifier()
+        verification_report = await verifier.verify()
+
+        # Print report to console
+        verifier.print_report(verification_report)
+
+        # Log critical issues
+        if verification_report.has_critical_issues():
+            logger.warning("⚠️ Template verification found CRITICAL issues - bot may not function correctly!")
+            logger.warning("   Review the verification report above for details.")
+        else:
+            logger.info("✓ Template verification passed")
+
+        # ═══════════════════════════════════════════════════════════════════════
         # STEP 7: Register handlers
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("🎯 Registering handlers...")

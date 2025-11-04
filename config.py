@@ -105,6 +105,7 @@ class Config:
     # System
     SYSTEM_READY = "SYSTEM_READY"
     BOT_USERNAME = "BOT_USERNAME"
+    TEMPLATE_LANGUAGES = "TEMPLATE_LANGUAGES"
 
     # Channels (для проверки подписки)
     REQUIRED_CHANNELS = "REQUIRED_CHANNELS"
@@ -336,6 +337,10 @@ class Config:
             # ─────────────────────────────────────────────────────────────────
             cls._config[cls.SYSTEM_READY] = False
             cls._config[cls.BOT_USERNAME] = None
+            cls._config[cls.TEMPLATE_LANGUAGES] = os.getenv(
+                "TEMPLATE_LANGUAGES",
+                "ru,en,de"
+            )
 
             # Mark as initialized
             cls._initialized = True
