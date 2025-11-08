@@ -1,15 +1,29 @@
 #!/usr/bin/env python3
 """
-Commission Testing Population Script.
+СЦЕНАРИЙ 1: Тест дифференциальных комиссий с компрессией
 
-Creates a linear chain specifically for testing differential commissions
-and compression mechanics.
+Структура для живого тестирования:
+ROOT (director, 18%)
+  → Dummy1 (❌ inactive, start) - СЖИМАЕТСЯ
+    → Dummy2 (✅ active, builder, 10%)
+      → Dummy3 (❌ inactive, start) - СЖИМАЕТСЯ
+        → ⭐️ Зодд (✅ active, start, 7%) - ТЫ делаешь покупку через Telegram!
 
-Chain structure:
-ROOT (director, 18%) → inactive → active (builder, 10%) → inactive → active (start, 7%) → Зодд (buyer)
+Что тестируем:
+1. Покупка от Зодд через Telegram
+2. Зодд НЕ получает комиссию (покупатель не получает)
+3. Dummy3 сжимается (неактивен)
+4. Dummy2 получает 10% + сжатую часть от Dummy3
+5. Dummy1 сжимается (неактивен)
+6. ROOT получает оставшееся до 18%
+
+Как тестировать:
+1. python scripts/populate_test_differential_commission.py
+2. В Telegram от имени Зодд делаешь покупку на $1000
+3. Проверяешь комиссии: python scripts/check_commissions.py --purchase-id <ID>
 
 Usage:
-    python scripts/populate_commission_test.py
+    python scripts/populate_test_differential_commission.py
 """
 
 import sys
@@ -18,7 +32,6 @@ import asyncio
 from decimal import Decimal
 from datetime import datetime, timezone
 
-# Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -35,8 +48,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Test chain configuration
-TEST_CHAIN = [
+# Структура для теста
+TEST_USERS = [
     {
         "telegram_id": 526738615,
         "firstname": "Артем",
@@ -48,49 +61,40 @@ TEST_CHAIN = [
         "is_root": True
     },
     {
-        "telegram_id": 100000,
-        "firstname": "Inactive1",
-        "surname": "Level1",
-        "email": "inactive1@test.com",
-        "rank": "start",
-        "is_active": False,
-        "balance": 0
-    },
-    {
         "telegram_id": 100001,
-        "firstname": "Builder1",
-        "surname": "Level2",
-        "email": "builder1@test.com",
-        "rank": "builder",
-        "is_active": True,
+        "firstname": "Dummy1_Inactive",
+        "surname": "Level1",
+        "email": "dummy1@test.com",
+        "rank": "start",
+        "is_active": False,  # СЖИМАЕТСЯ
         "balance": 0
     },
     {
         "telegram_id": 100002,
-        "firstname": "Inactive2",
-        "surname": "Level3",
-        "email": "inactive2@test.com",
-        "rank": "start",
-        "is_active": False,
+        "firstname": "Dummy2_Builder",
+        "surname": "Level2",
+        "email": "dummy2@test.com",
+        "rank": "builder",
+        "is_active": True,  # Получит 10% + compression
         "balance": 0
     },
     {
         "telegram_id": 100003,
-        "firstname": "Start1",
-        "surname": "Level4",
-        "email": "start1@test.com",
+        "firstname": "Dummy3_Inactive",
+        "surname": "Level3",
+        "email": "dummy3@test.com",
         "rank": "start",
-        "is_active": True,
+        "is_active": False,  # СЖИМАЕТСЯ
         "balance": 0
     },
     {
-        "telegram_id": 5971989877,
+        "telegram_id": 5971989877,  # ⭐️ ЗОДД
         "firstname": "Зодд",
         "surname": "Зверев",
         "email": "zodd@test.com",
         "rank": "start",
         "is_active": True,
-        "balance": 10000
+        "balance": 10000  # Баланс для покупок
     }
 ]
 
@@ -98,10 +102,15 @@ TEST_CHAIN = [
 async def main():
     """Main population script."""
     print("\n" + "=" * 80)
-    print("🧪 COMMISSION TESTING - DATABASE POPULATION")
+    print("🧪 СЦЕНАРИЙ 1: ДИФФЕРЕНЦИАЛЬНЫЕ КОМИССИИ С КОМПРЕССИЕЙ")
     print("=" * 80)
-    print("\nThis creates a linear chain for testing differential commissions.")
-    print("⚠️  WARNING: This will DROP and recreate the entire database!\n")
+    print("\nСтруктура:")
+    print("  ROOT (director, 18%)")
+    print("    → Dummy1 ❌ (inactive) - сжимается")
+    print("      → Dummy2 ✅ (builder, 10%) - получит свои 10% + compression")
+    print("        → Dummy3 ❌ (inactive) - сжимается")
+    print("          → ⭐️ ЗОДД ✅ (start, 7%) - ТЫ делаешь покупку!")
+    print("\n⚠️  WARNING: This will DROP and recreate the entire database!\n")
 
     confirm = input("Type 'YES' to continue: ")
     if confirm != "YES":
@@ -110,78 +119,65 @@ async def main():
 
     print("\n🔄 Starting database population...\n")
 
-    # Step 1: Initialize config
-    print("📋 Step 1: Loading configuration...")
     Config.initialize_from_env()
-    print("✓ Configuration loaded\n")
 
-    # Step 2: Drop and recreate database
-    print("💣 Step 2: Dropping existing database...")
+    print("💣 Dropping existing database...")
     drop_all_tables()
     print("✓ Database dropped\n")
 
-    print("🗂️  Step 3: Creating tables...")
+    print("🗂️  Creating tables...")
     setup_database()
     print("✓ Tables created\n")
 
-    # Step 4: Import projects
-    print("📥 Step 4: Importing projects from Google Sheets...")
+    print("📥 Importing projects from Google Sheets...")
     await import_projects()
     print("✓ Projects imported\n")
 
-    # Step 5: Create chain
-    print("⛓️  Step 5: Creating test chain...")
+    print("⛓️  Creating test chain...")
     await create_test_chain()
     print("✓ Test chain created\n")
 
-    # Step 6: Validate
-    print("🔍 Step 6: Validating chain integrity...")
+    print("🔍 Validating chain integrity...")
     await validate_chain()
     print("✓ Chain validation passed\n")
 
-    # Step 7: Print structure
-    print("🌳 Step 7: Visualizing structure...\n")
+    print("🌳 Structure visualization:\n")
     print_chain()
 
     print("\n" + "=" * 80)
-    print("✅ COMMISSION TEST DATABASE READY!")
+    print("✅ DATABASE READY FOR TESTING!")
     print("=" * 80)
-    print("\nTest chain:")
-    for i, user_config in enumerate(TEST_CHAIN):
-        marker = "👑 " if user_config.get("is_root") else ""
-        marker += "⭐ " if user_config["telegram_id"] >= 1000000 else ""
-        active = "✅" if user_config["is_active"] else "❌"
-        print(f"  Level {i}: {marker}{user_config['firstname']} ({user_config['rank']}) {active}")
+    print("\n📝 КАК ТЕСТИРОВАТЬ:")
+    print("1. Открой Telegram от имени Зодд")
+    print("2. Сделай покупку на $1000 (или любую сумму)")
+    print("3. Проверь результат:")
+    print("   python scripts/check_commissions.py --last")
+    print("\n📊 ОЖИДАЕМЫЙ РЕЗУЛЬТАТ:")
+    print("   • Dummy2 (builder): ~10% + compression от Dummy1 и Dummy3")
+    print("   • ROOT: оставшееся до 18%")
+    print("   • Сумма всех комиссий = 18% от покупки")
     print("\n")
 
 
 async def import_projects():
     """Import projects and options from Google Sheets."""
     result = await import_projects_and_options()
-
     if not result.get("success"):
         raise Exception(f"Import failed: {result.get('error_messages')}")
 
-    logger.info(
-        f"Imported: {result['projects']['added']} projects, "
-        f"{result['options']['added']} options"
-    )
-
 
 async def create_test_chain():
-    """Create linear test chain."""
+    """Create test chain."""
     session = get_session()
     try:
         previous_user = None
 
-        for user_config in TEST_CHAIN:
-            # Determine referrer
+        for user_config in TEST_USERS:
             if user_config.get("is_root"):
                 referrer_id = None
             else:
                 referrer_id = previous_user.telegramID if previous_user else None
 
-            # Create Telegram user object
             telegram_user = TelegramUser(
                 id=user_config["telegram_id"],
                 is_bot=False,
@@ -190,25 +186,21 @@ async def create_test_chain():
                 language_code="ru"
             )
 
-            # Create user
             user = User.create_from_telegram_data(
                 session=session,
                 telegram_user=telegram_user,
                 referrer_id=referrer_id
             )
 
-            # Set properties
             user.surname = user_config.get("surname")
             user.email = user_config["email"]
             user.rank = user_config["rank"]
             user.isActive = user_config["is_active"]
             user.balanceActive = Decimal(str(user_config["balance"]))
 
-            # Fix upline for root
             if user_config.get("is_root"):
                 user.upline = user.telegramID
 
-            # Set personalData
             user.personalData = {
                 "dataFilled": True,
                 "eulaAccepted": True,
@@ -232,7 +224,6 @@ async def create_test_chain():
             previous_user = user
 
         session.commit()
-        logger.info(f"✓ Created {len(TEST_CHAIN)} users in linear chain")
 
     finally:
         session.close()
@@ -251,14 +242,12 @@ async def validate_chain():
         if orphans:
             raise Exception(f"Found {len(orphans)} orphan users: {orphans}")
 
-        logger.info("✓ All chains valid, no orphans found")
-
     finally:
         session.close()
 
 
 def print_chain():
-    """Print linear chain."""
+    """Print chain."""
     session = get_session()
     try:
         walker = ChainWalker(session)
@@ -269,7 +258,7 @@ def print_chain():
             rank_display = f"[{user.rank}]"
             balance_display = f"${user.balanceActive}" if user.balanceActive > 0 else ""
             root_marker = "👑 " if walker.is_system_root(user) else ""
-            real_marker = "⭐ " if user.telegramID >= 1000000 else ""
+            real_marker = "⭐️ " if user.telegramID >= 1000000 else ""
             active_marker = "✅" if user.isActive else "❌"
 
             print(
@@ -277,18 +266,15 @@ def print_chain():
                 f"(ID:{user.telegramID}) {active_marker} {rank_display} {balance_display}"
             )
 
-            # Get children
             children = session.query(User).filter(User.upline == user.telegramID).all()
             children = [c for c in children if not walker.is_system_root(c)]
 
             for child in children:
                 print_user(child, level + 1)
 
-        print("\n" + "=" * 80)
-        print("COMMISSION TEST CHAIN")
-        print("=" * 80 + "\n")
+        print("=" * 80)
         print_user(root)
-        print("\n" + "=" * 80 + "\n")
+        print("=" * 80)
 
     finally:
         session.close()
