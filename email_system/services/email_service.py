@@ -29,7 +29,13 @@ class EmailService:
     Usage:
         email_service = EmailService()
         await email_service.initialize()
-        success = await email_service.send_verification_email(user, link)
+        success = await email_service.send_email(
+            to='user@example.com',
+            subject_template_key='email/subject',
+            body_template_key='email/body',
+            variables={'name': 'John'},
+            lang='en'
+        )
     """
 
     def __init__(self):

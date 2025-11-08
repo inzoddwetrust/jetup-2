@@ -15,7 +15,6 @@ from core.message_manager import MessageManager
 from core.user_decorator import with_user
 from models.user import User
 from services.imports import import_projects_and_options
-from services.stats_service import StatsService
 from core.di import get_service
 from config import Config
 
@@ -115,10 +114,8 @@ async def cmd_upconfig(
                 result_text += f"\n\nErrors:\n{error_summary}"
 
         # Refresh statistics
-        stats_service = get_service(StatsService)
-        if stats_service:
-            await stats_service.refresh_all()
-            result_text += "\n\n📊 Statistics refreshed"
+        await Config.refresh_all_dynamic()
+        result_text += "\n\n📊 Statistics refreshed"
 
         await status_msg.edit_text(result_text)
 
@@ -130,21 +127,17 @@ async def cmd_upconfig(
 @admin_router.message(F.text == '&stats')
 async def cmd_stats(message: Message, user: User, session, message_manager: MessageManager):
     """Show bot statistics."""
-    stats_service = get_service(StatsService)
-    if not stats_service:
-        await message.answer("❌ Stats service not available")
-        return
-
     try:
-        users_count = await stats_service.get_users_count()
-        projects_count = await stats_service.get_projects_count()
-        purchases_total = await stats_service.get_purchases_total()
+        # Get statistics from Config dynamic values
+        users_count = await Config.get_dynamic(Config.USERS_COUNT) or 0
+        projects_count = await Config.get_dynamic(Config.PROJECTS_COUNT) or 0
+        invested_total = await Config.get_dynamic(Config.INVESTED_TOTAL) or 0
 
         stats_text = (
             "📊 <b>Bot Statistics</b>\n\n"
             f"👥 Users: {users_count:,}\n"
             f"🚀 Projects: {projects_count}\n"
-            f"💰 Total Investments: ${purchases_total:,.2f}\n"
+            f"💰 Total Investments: ${invested_total:,.2f}\n"
         )
 
         await message.answer(stats_text, parse_mode="HTML")

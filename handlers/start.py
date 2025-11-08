@@ -147,7 +147,7 @@ async def show_welcome_screen(
     # ========================================================================
     # EULA CHECK
     # ========================================================================
-    if not auth_service.is_eula_accepted(user):
+    if not auth_service.check_eula_accepted(user):
         logger.info(f"User {user.userID} needs to accept EULA")
         await message_manager.send_template(
             user=user,
