@@ -347,28 +347,20 @@ async def show_dashboard(
 ):
     """Show main dashboard screen with full statistics."""
     # ========================================================================
-    # GET SERVICES
+    # GLOBAL STATISTICS (from Config dynamic values)
     # ========================================================================
-    stats_service = get_service(StatsService)
+    projects_count = await Config.get_dynamic(Config.PROJECTS_COUNT) or 0
+    users_count = await Config.get_dynamic(Config.USERS_COUNT) or 0
+    invested_total = await Config.get_dynamic(Config.INVESTED_TOTAL) or Decimal("0")
 
-    # ========================================================================
-    # GLOBAL STATISTICS
-    # ========================================================================
-    projects_count = 0
-    users_count = 0
-    purchases_total = 0
-
-    if stats_service:
-        try:
-            projects_count = await stats_service.get_projects_count()
-            users_count = await stats_service.get_users_count()
-            purchases_total = await stats_service.get_purchases_total()
-        except Exception as e:
-            logger.error(f"Error getting global stats: {e}")
+    # Convert Decimal to float for template
+    purchases_total = float(invested_total)
 
     # ========================================================================
     # USER STATISTICS
     # ========================================================================
+    stats_service = get_service(StatsService)
+
     upline_count = 0
     upline_total = 0
     user_purchases_total = Decimal("0")
