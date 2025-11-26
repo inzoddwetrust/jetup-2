@@ -137,23 +137,34 @@ async def show_welcome_screen(
     Show appropriate welcome screen based on user state.
 
     Flow:
-    1. If EULA not accepted → show EULA screen
-    2. If not subscribed to channels → show subscription prompt
-    3. If existing user → show dashboard with stats
-    4. If new user → show welcome screen
+    1. If EULA not accepted → show EULA screen (/dashboard/newUser)
+    2. If not subscribed to channels → show subscription prompt (/dashboard/noSubscribe)
+    3. If existing user → show dashboard (/dashboard/existingUser)
     """
     logger.info(f"show_welcome_screen for user {user.userID}")
 
     # ========================================================================
     # EULA CHECK
     # ========================================================================
-    if not auth_service.is_eula_accepted(user):
+    if not auth_service.check_eula_accepted(user):
         logger.info(f"User {user.userID} needs to accept EULA")
+
+        projects_count = await Config.get_dynamic(Config.PROJECTS_COUNT) or 0
+        users_count = await Config.get_dynamic(Config.USERS_COUNT) or 0
+        invested_total = await Config.get_dynamic(Config.INVESTED_TOTAL) or Decimal("0")
+        purchases_total = float(invested_total)
+
         await message_manager.send_template(
             user=user,
-            template_key='eula_screen',
+            template_key='/dashboard/newUser',
             update=message_or_callback,
-            variables={'firstname': user.firstname or 'User'}
+            variables={
+                'firstname': user.firstname or 'User',
+                'language': user.lang or 'en',
+                'projectsCount': projects_count,
+                'usersCount': users_count,
+                'purchasesTotal': purchases_total
+            }
         )
         return
 
@@ -170,7 +181,7 @@ async def show_welcome_screen(
 
         await message_manager.send_template(
             user=user,
-            template_key='channel_missing',
+            template_key='/dashboard/noSubscribe',  # FIX: was 'channel_missing'
             update=message_or_callback,
             variables={
                 'firstname': user.firstname or 'User',
@@ -179,7 +190,8 @@ async def show_welcome_screen(
                     'url': urls,
                     'langChannel': channels
                 }
-            }
+            },
+            delete_original=isinstance(message_or_callback, CallbackQuery)
         )
         return
 
@@ -198,177 +210,6 @@ async def show_welcome_screen(
     # ========================================================================
     stats_service = get_service(StatsService)
 
-    upline_count = 0
-    upline_total = 0
-    user_purchases_total = Decimal("0")
-
-    if stats_service:
-        try:
-            # Direct referrals
-            upline_count = await stats_service.get_user_referrals_count(
-                user.telegramID,
-                direct_only=True
-            )
-
-            # All referrals (recursive)
-            upline_total = await stats_service.get_user_referrals_count(
-                user.telegramID,
-                direct_only=False
-            )
-
-            # User's total purchases
-            user_purchases_total = await stats_service.get_user_purchases_total(user.userID)
-
-        except Exception as e:
-            logger.error(f"Error getting user stats: {e}")
-
-    # ========================================================================
-    # MLM DATA
-    # ========================================================================
-    rank_display = "Старт"
-    monthly_pv = Decimal("0")
-
-    try:
-        rank_service = RankService(session)
-        active_rank = await rank_service.getUserActiveRank(user.userID)
-
-        # Get rank display name
-        try:
-            rank_enum = Rank(active_rank)
-            rank_config = RANK_CONFIG()
-            rank_display = rank_config.get(rank_enum, {}).get("displayName", active_rank)
-        except (ValueError, KeyError):
-            rank_display = active_rank
-
-        # Get monthly PV
-        if user.mlmVolumes:
-            monthly_pv = Decimal(str(user.mlmVolumes.get("monthlyPV", "0")))
-
-    except Exception as e:
-        logger.error(f"Error getting MLM data: {e}")
-
-    # ========================================================================
-    # DETERMINE TEMPLATE KEYS
-    # ========================================================================
-    template_keys = ['/dashboard/existingUser']
-
-    # Add additional template if user data not filled
-    if not user.isFilled:
-        template_keys.append('settings_unfilled_data')
-    elif user.isFilled and not user.emailConfirmed:
-        template_keys.append('settings_filled_unconfirmed')
-
-    # ========================================================================
-    # SEND DASHBOARD
-    # ========================================================================
-    await message_manager.send_template(
-        user=user,
-        template_key=template_keys,
-        update=message_or_callback,
-        variables={
-            # User info
-            'firstname': user.firstname or 'User',
-            'language': user.lang or 'en',
-            'email': user.email or '',
-
-            # Balances
-            'balanceActive': float(user.balanceActive or 0),
-            'balancePassive': float(user.balancePassive or 0),
-            'balance': float((user.balanceActive or 0) + (user.balancePassive or 0)),
-
-            # Global statistics
-            'projectsCount': projects_count,
-            'usersCount': users_count,
-            'purchasesTotal': purchases_total,
-
-            # User statistics
-            'userPurchasesTotal': float(user_purchases_total),
-            'uplineCount': upline_count,
-            'uplineTotal': upline_total,
-
-            # MLM data
-            'rank': rank_display,
-            'isActive': user.isActive,
-            'monthlyPV': float(monthly_pv),
-            'teamVolumeTotal': float(user.teamVolumeTotal or 0)
-        },
-        delete_original=isinstance(message_or_callback, CallbackQuery)
-    )
-
-
-async def show_eula_screen(
-        user: User,
-        message_or_callback: Message | CallbackQuery,
-        message_manager: MessageManager
-):
-    """Show EULA acceptance screen for new users."""
-    await message_manager.send_template(
-        user=user,
-        template_key='/dashboard/newUser',
-        update=message_or_callback,
-        variables={
-            'firstname': user.firstname or 'User'
-        }
-    )
-
-
-async def show_subscription_prompt(
-        user: User,
-        message_or_callback: Message | CallbackQuery,
-        message_manager: MessageManager,
-        not_subscribed_channels: list
-):
-    """Show channel subscription prompt with list of required channels."""
-    # Prepare channel data for template
-    channels = [c['title'] for c in not_subscribed_channels]
-    urls = [c['url'] for c in not_subscribed_channels]
-
-    await message_manager.send_template(
-        user=user,
-        template_key='/dashboard/noSubscribe',
-        update=message_or_callback,
-        variables={
-            'firstname': user.firstname or 'User',
-            'rgroup': {
-                'channel': channels,
-                'url': urls,
-                'langChannel': channels
-            }
-        },
-        delete_original=isinstance(message_or_callback, CallbackQuery)
-    )
-
-
-async def show_dashboard(
-        user: User,
-        message_or_callback: Message | CallbackQuery,
-        message_manager: MessageManager,
-        session: Session
-):
-    """Show main dashboard screen with full statistics."""
-    # ========================================================================
-    # GET SERVICES
-    # ========================================================================
-    stats_service = get_service(StatsService)
-
-    # ========================================================================
-    # GLOBAL STATISTICS
-    # ========================================================================
-    projects_count = 0
-    users_count = 0
-    purchases_total = 0
-
-    if stats_service:
-        try:
-            projects_count = await stats_service.get_projects_count()
-            users_count = await stats_service.get_users_count()
-            purchases_total = await stats_service.get_purchases_total()
-        except Exception as e:
-            logger.error(f"Error getting global stats: {e}")
-
-    # ========================================================================
-    # USER STATISTICS
-    # ========================================================================
     upline_count = 0
     upline_total = 0
     user_purchases_total = Decimal("0")
@@ -518,7 +359,7 @@ async def handle_check_subscription(
 
         await message_manager.send_template(
             user=user,
-            template_key='channel_missing',
+            template_key='/dashboard/noSubscribeRepeat',
             update=callback_query,
             variables={
                 'firstname': user.firstname or 'User',
@@ -589,14 +430,11 @@ async def handle_invoice_deep_link(
         return
 
     if payment.userID != user.userID:
-        logger.warning(f"User {user.telegramID} tried to access invoice {invoice_id} of user {payment.userID}")
+        logger.warning(f"User {user.userID} tried to access invoice {invoice_id} (belongs to {payment.userID})")
         await message.answer("❌ This invoice does not belong to you.")
         return
 
-    # Get wallet from config (loaded from Google Sheets)
-    wallets = Config.get('WALLETS') or {}
-    wallet = payment.toWallet or wallets.get(payment.method)
-
+    # Show invoice details
     await message_manager.send_template(
         user=user,
         template_key='pending_invoice_details',
@@ -605,7 +443,7 @@ async def handle_invoice_deep_link(
             'amount': payment.amount,
             'method': payment.method,
             'sumCurrency': payment.sumCurrency,
-            'wallet': wallet,
+            'wallet': payment.toWallet or Config.WALLETS.get(payment.method, 'N/A'),
             'payment_id': payment.paymentID
         }
     )
@@ -620,35 +458,28 @@ async def handle_purchase_deep_link(
     """
     Handle /start purchase_ID deep link.
     Generates purchase agreement document.
-
-    Flow:
-    1. Get purchase_id from deep link
-    2. Call generate_document() with purchase_id
-    3. Send PDF to user
     """
-    logger.info(f"Purchase document deep link: user={user.telegramID}, purchase={purchase_id}")
+    logger.info(f"Purchase deep link: user={user.telegramID}, purchase={purchase_id}")
 
     try:
-        # Convert purchase_id to int
         purchase_id_int = int(purchase_id)
     except ValueError:
         logger.error(f"Invalid purchase_id: {purchase_id}")
         await message.answer("❌ Invalid purchase ID")
         return
 
-    # Verify purchase belongs to user (security check)
+    # Check if purchase exists and belongs to user
     purchase = session.query(Purchase).filter_by(
         purchaseID=purchase_id_int,
         userID=user.userID
     ).first()
 
     if not purchase:
-        logger.warning(f"Purchase {purchase_id_int} not found for user {user.userID}")
-        await message.answer("❌ Purchase not found or does not belong to you")
+        logger.warning(f"Purchase {purchase_id_int} not found or doesn't belong to user {user.userID}")
+        await message.answer("❌ Purchase not found or doesn't belong to you")
         return
 
     # Generate PDF
-    # document_type='purchase' tells it to generate purchase agreement
     pdf_bytes = generate_document(
         session=session,
         user=user,

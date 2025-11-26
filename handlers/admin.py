@@ -117,7 +117,7 @@ async def cmd_upconfig(
         # Refresh statistics
         stats_service = get_service(StatsService)
         if stats_service:
-            await stats_service.refresh_all()
+            await Config.refresh_all_dynamic()
             result_text += "\n\n📊 Statistics refreshed"
 
         await status_msg.edit_text(result_text)
