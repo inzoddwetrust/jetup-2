@@ -5,7 +5,6 @@ Ported from Talentir main.py.
 """
 import logging
 from decimal import Decimal
-from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
@@ -13,7 +12,6 @@ from sqlalchemy.orm import Session
 
 from models.user import User
 from models.payment import Payment
-from models.active_balance import ActiveBalance
 from models.notification import Notification
 from core.message_manager import MessageManager
 from states.fsm_states import PurchaseFlow, TxidInputState

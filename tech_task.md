@@ -41,6 +41,45 @@
 
 ### 1.3 Критичные расхождения
 
+#### АРХИТЕКТУРНАЯ ПРОБЛЕМА: Хаотичная работа с сервисами
+
+**Нет единого подхода к Dependency Injection:**
+
+| Сервис | Как используется | Проблема |
+|--------|------------------|----------|
+| `EmailService` | DI (`register_service` → `get_service`) | ✅ Правильно |
+| `MessageManager` | DI | ✅ Правильно |
+| `StatsService` | `get_service(StatsService)` | ❌ Класс не существует, только функции |
+| `AuthService` | Создаётся локально `AuthService(session)` | ❌ Не в DI |
+| `RankService` | Создаётся локально | ❌ Не в DI |
+| `VolumeService` | Создаётся локально | ❌ Не в DI |
+
+**Конкретный баг:**
+```python
+# handlers/start.py (строка 18):
+from services.stats_service import StatsService  # ❌ НЕ СУЩЕСТВУЕТ!
+
+# services/stats_service.py — это ФУНКЦИИ, не класс:
+def update_users_count() -> int:
+def update_projects_count() -> int:
+```
+
+**Решение:** Выбрать ОДИН подход и применить везде:
+
+**Вариант A — Все сервисы через DI:**
+- Создать классы для всех сервисов
+- Регистрировать в `jetup.py`
+- Получать через `get_service()`
+
+**Вариант B — Сервисы с session создаются локально:**
+- `AuthService(session)`, `RankService(session)` — ок
+- Stateless сервисы (`EmailService`) — через DI
+- Убрать несуществующие импорты
+
+**Рекомендация:** Вариант B проще, меньше изменений.
+
+---
+
 #### Конфигурация рангов (ranks.py vs ТЗ)
 
 | Ранг | ТЗ | Код | Статус |
@@ -78,6 +117,31 @@ ChainWalker.walk_downline()  # Вся структура рекурсивно
 ```
 
 **Влияние:** Пользователи не получают ранги из-за заниженного подсчёта.
+
+#### StatsService — не зарегистрирован в DI
+
+**Файл:** `handlers/admin.py` (legacy_commands.py)
+
+Код использует `get_service(StatsService)`, но сервис **не зарегистрирован** в `jetup.py`.
+
+```python
+# handlers/admin.py (строка ~131):
+stats_service = get_service(StatsService)  # ❌ Возвращает None
+
+# jetup.py — НЕТ регистрации:
+# register_service(StatsService, stats_service)  # ❌ ОТСУТСТВУЕТ
+```
+
+**Влияние:** Команда `&stats` не работает (выводит "Stats service not available").
+
+**Решение:** Либо зарегистрировать StatsService в jetup.py:
+```python
+from services.stats_service import StatsService
+stats_service = StatsService()
+register_service(StatsService, stats_service)
+```
+
+Либо переписать `&stats` на прямые запросы (если StatsService не нужен в других местах).
 
 ---
 
