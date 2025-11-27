@@ -11,6 +11,7 @@ For now, they are grouped here to preserve functionality during migration.
 """
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from aiogram import Router, F
 from aiogram.types import Message
@@ -21,7 +22,6 @@ from core.message_manager import MessageManager
 from core.di import get_service
 from models.user import User
 from services.imports import import_projects_and_options
-from services.stats_service import StatsService
 from email_system import EmailService
 
 logger = logging.getLogger(__name__)
@@ -85,11 +85,9 @@ async def cmd_upconfig(
                 error_summary = "\n".join(import_result["error_messages"][:3])
                 result_text += f"\n\nErrors:\n{error_summary}"
 
-        # Refresh statistics
-        stats_service = get_service(StatsService)
-        if stats_service:
-            await Config.refresh_all_dynamic()
-            result_text += "\n\n📊 Statistics refreshed"
+        # Refresh dynamic statistics (no need for StatsService check)
+        await Config.refresh_all_dynamic()
+        result_text += "\n\n📊 Statistics refreshed"
 
         await status_msg.edit_text(result_text)
 
@@ -98,6 +96,10 @@ async def cmd_upconfig(
         await status_msg.edit_text(f"❌ Error: {str(e)}")
 
 
+# =============================================================================
+# STATS COMMAND
+# =============================================================================
+
 @legacy_router.message(F.text == '&stats')
 async def cmd_stats(
         message: Message,
@@ -105,22 +107,31 @@ async def cmd_stats(
         session: Session,
         message_manager: MessageManager
 ):
-    """Show bot statistics."""
-    stats_service = get_service(StatsService)
-    if not stats_service:
-        await message.answer("❌ Stats service not available")
-        return
+    """
+    Show bot statistics.
+
+    Uses Config.get_dynamic() for global statistics.
+    StatsService is for user-specific stats only.
+    """
+    logger.info(f"Admin {message.from_user.id} triggered &stats")
 
     try:
-        users_count = await stats_service.get_users_count()
-        projects_count = await stats_service.get_projects_count()
-        purchases_total = await stats_service.get_purchases_total()
+        # Get global statistics from Config dynamic values
+        users_count = await Config.get_dynamic(Config.USERS_COUNT) or 0
+        projects_count = await Config.get_dynamic(Config.PROJECTS_COUNT) or 0
+        invested_total = await Config.get_dynamic(Config.INVESTED_TOTAL) or Decimal("0")
+
+        # Convert to float for display
+        purchases_total = float(invested_total)
 
         # Check Time Machine status
         from mlm_system.utils.time_machine import timeMachine
         time_status = ""
         if timeMachine._isTestMode:
-            time_status = f"\n\n⚠️ <b>TIME MACHINE ACTIVE</b>\nVirtual: {timeMachine.now.strftime('%Y-%m-%d %H:%M')}"
+            time_status = (
+                f"\n\n⚠️ <b>TIME MACHINE ACTIVE</b>\n"
+                f"Virtual: {timeMachine.now.strftime('%Y-%m-%d %H:%M')}"
+            )
 
         stats_text = (
             "📊 <b>Bot Statistics</b>\n\n"
@@ -138,7 +149,7 @@ async def cmd_stats(
 
 
 # =============================================================================
-# TESTMAIL COMMAND (abbreviated - full version in original admin.py)
+# TESTMAIL COMMAND
 # =============================================================================
 
 @legacy_router.message(F.text.startswith('&testmail'))

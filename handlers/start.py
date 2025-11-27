@@ -1,4 +1,4 @@
-# jetup/handlers/start.py
+# handlers/start.py
 """
 Start command handler and welcome flow.
 Handles user registration, EULA acceptance, and channel subscription checks.
@@ -23,13 +23,16 @@ from services.stats_service import StatsService
 from mlm_system.services.rank_service import RankService
 from mlm_system.config.ranks import RANK_CONFIG, Rank
 from core.message_manager import MessageManager
-from core.di import get_service
 from config import Config
 
 logger = logging.getLogger(__name__)
 
 start_router = Router(name="start_router")
 
+
+# =============================================================================
+# MAIN START COMMAND
+# =============================================================================
 
 @start_router.message(CommandStart())
 async def cmd_start(
@@ -82,9 +85,9 @@ async def cmd_start(
             await message.answer("⚠️ System configuration error. Please contact support.")
             return
 
-    # ========================================================================
+    # =========================================================================
     # DEEP LINK PAYLOADS - Process before welcome flow
-    # ========================================================================
+    # =========================================================================
 
     if start_payload:
         # Invoice deep link: /start invoice_12345
@@ -112,18 +115,22 @@ async def cmd_start(
             return
 
         # Handle old email verification (DARWIN migration)
-        if start_payload and start_payload.startswith('oldemailverif_'):
+        if start_payload.startswith('oldemailverif_'):
             token = start_payload.replace('oldemailverif_', '')
             await handle_old_email_verification(message, user, session, message_manager, token)
             return
 
-    # ========================================================================
+    # =========================================================================
     # STANDARD WELCOME FLOW
-    # ========================================================================
+    # =========================================================================
 
     auth_service = AuthService(session)
     await show_welcome_screen(user, message, session, bot, message_manager, auth_service)
 
+
+# =============================================================================
+# WELCOME SCREEN
+# =============================================================================
 
 async def show_welcome_screen(
         user: User,
@@ -143,9 +150,9 @@ async def show_welcome_screen(
     """
     logger.info(f"show_welcome_screen for user {user.userID}")
 
-    # ========================================================================
+    # =========================================================================
     # EULA CHECK
-    # ========================================================================
+    # =========================================================================
     if not auth_service.check_eula_accepted(user):
         logger.info(f"User {user.userID} needs to accept EULA")
 
@@ -168,9 +175,9 @@ async def show_welcome_screen(
         )
         return
 
-    # ========================================================================
+    # =========================================================================
     # CHANNEL SUBSCRIPTION CHECK
-    # ========================================================================
+    # =========================================================================
     subscribed, not_subscribed_channels = await auth_service.check_channel_subscriptions(bot, user)
 
     if not subscribed:
@@ -181,7 +188,7 @@ async def show_welcome_screen(
 
         await message_manager.send_template(
             user=user,
-            template_key='/dashboard/noSubscribe',  # FIX: was 'channel_missing'
+            template_key='/dashboard/noSubscribe',
             update=message_or_callback,
             variables={
                 'firstname': user.firstname or 'User',
@@ -195,9 +202,9 @@ async def show_welcome_screen(
         )
         return
 
-    # ========================================================================
+    # =========================================================================
     # GET GLOBAL STATISTICS (from Config dynamic values)
-    # ========================================================================
+    # =========================================================================
     projects_count = await Config.get_dynamic(Config.PROJECTS_COUNT) or 0
     users_count = await Config.get_dynamic(Config.USERS_COUNT) or 0
     invested_total = await Config.get_dynamic(Config.INVESTED_TOTAL) or Decimal("0")
@@ -205,38 +212,38 @@ async def show_welcome_screen(
     # Convert Decimal to float for template
     purchases_total = float(invested_total)
 
-    # ========================================================================
+    # =========================================================================
     # GET USER-SPECIFIC STATISTICS
-    # ========================================================================
-    stats_service = get_service(StatsService)
+    # =========================================================================
+    # StatsService is stateless - create locally (not via DI)
+    stats_service = StatsService()
 
     upline_count = 0
     upline_total = 0
     user_purchases_total = Decimal("0")
 
-    if stats_service:
-        try:
-            # Direct referrals
-            upline_count = await stats_service.get_user_referrals_count(
-                user.telegramID,
-                direct_only=True
-            )
+    try:
+        # Direct referrals
+        upline_count = await stats_service.get_user_referrals_count(
+            user.telegramID,
+            direct_only=True
+        )
 
-            # All referrals (recursive)
-            upline_total = await stats_service.get_user_referrals_count(
-                user.telegramID,
-                direct_only=False
-            )
+        # All referrals (recursive)
+        upline_total = await stats_service.get_user_referrals_count(
+            user.telegramID,
+            direct_only=False
+        )
 
-            # User's total purchases
-            user_purchases_total = await stats_service.get_user_purchases_total(user.userID)
+        # User's total purchases
+        user_purchases_total = await stats_service.get_user_purchases_total(user.userID)
 
-        except Exception as e:
-            logger.error(f"Error getting user stats: {e}")
+    except Exception as e:
+        logger.error(f"Error getting user stats: {e}")
 
-    # ========================================================================
+    # =========================================================================
     # MLM DATA
-    # ========================================================================
+    # =========================================================================
     rank_display = "Старт"
     monthly_pv = Decimal("0")
 
@@ -259,9 +266,9 @@ async def show_welcome_screen(
     except Exception as e:
         logger.error(f"Error getting MLM data: {e}")
 
-    # ========================================================================
+    # =========================================================================
     # DETERMINE TEMPLATE KEYS
-    # ========================================================================
+    # =========================================================================
     template_keys = ['/dashboard/existingUser']
 
     # Add additional template if user data not filled
@@ -270,9 +277,9 @@ async def show_welcome_screen(
     elif user.isFilled and not user.emailConfirmed:
         template_keys.append('settings_filled_unconfirmed')
 
-    # ========================================================================
+    # =========================================================================
     # SEND DASHBOARD
-    # ========================================================================
+    # =========================================================================
     await message_manager.send_template(
         user=user,
         template_key=template_keys,
@@ -307,6 +314,10 @@ async def show_welcome_screen(
         delete_original=isinstance(message_or_callback, CallbackQuery)
     )
 
+
+# =============================================================================
+# EULA AND SUBSCRIPTION CALLBACKS
+# =============================================================================
 
 @start_router.callback_query(F.data == '/acceptEula')
 async def handle_eula_accept(
@@ -402,9 +413,9 @@ async def handle_language_select(
     await show_welcome_screen(user, callback_query, session, bot, message_manager, auth_service)
 
 
-# ============================================================================
+# =============================================================================
 # DEEP LINK HANDLERS
-# ============================================================================
+# =============================================================================
 
 async def handle_invoice_deep_link(
         message: Message,
@@ -430,8 +441,8 @@ async def handle_invoice_deep_link(
         return
 
     if payment.userID != user.userID:
-        logger.warning(f"User {user.userID} tried to access invoice {invoice_id} (belongs to {payment.userID})")
-        await message.answer("❌ This invoice does not belong to you.")
+        logger.warning(f"Invoice {invoice_id} doesn't belong to user {user.userID}")
+        await message.answer("❌ This invoice doesn't belong to you.")
         return
 
     # Show invoice details
@@ -443,7 +454,7 @@ async def handle_invoice_deep_link(
             'amount': payment.amount,
             'method': payment.method,
             'sumCurrency': payment.sumCurrency,
-            'wallet': payment.toWallet or Config.WALLETS.get(payment.method, 'N/A'),
+            'wallet': payment.toWallet or Config.get(Config.WALLETS, {}).get(payment.method),
             'payment_id': payment.paymentID
         }
     )
@@ -457,29 +468,28 @@ async def handle_purchase_deep_link(
 ):
     """
     Handle /start purchase_ID deep link.
-    Generates purchase agreement document.
+    Generates and sends purchase agreement PDF.
     """
     logger.info(f"Purchase deep link: user={user.telegramID}, purchase={purchase_id}")
 
     try:
         purchase_id_int = int(purchase_id)
     except ValueError:
-        logger.error(f"Invalid purchase_id: {purchase_id}")
-        await message.answer("❌ Invalid purchase ID")
+        await message.answer("❌ Invalid purchase ID.")
         return
 
-    # Check if purchase exists and belongs to user
-    purchase = session.query(Purchase).filter_by(
-        purchaseID=purchase_id_int,
-        userID=user.userID
-    ).first()
+    # Verify purchase belongs to user
+    purchase = session.query(Purchase).filter_by(purchaseID=purchase_id_int).first()
 
     if not purchase:
-        logger.warning(f"Purchase {purchase_id_int} not found or doesn't belong to user {user.userID}")
-        await message.answer("❌ Purchase not found or doesn't belong to you")
+        await message.answer("❌ Purchase not found.")
         return
 
-    # Generate PDF
+    if purchase.userID != user.userID:
+        await message.answer("❌ This purchase doesn't belong to you.")
+        return
+
+    # Generate PDF (synchronous function!)
     pdf_bytes = generate_document(
         session=session,
         user=user,
@@ -488,21 +498,19 @@ async def handle_purchase_deep_link(
     )
 
     if not pdf_bytes:
-        logger.error(f"Failed to generate purchase document for purchase {purchase_id_int}")
         await message.answer("❌ Failed to generate document. Please try again later.")
         return
 
     # Create file from bytes and send
-    # Filename format: purchase_{purchase_id}.pdf (as in old Talentir)
     file = BufferedInputFile(
         file=pdf_bytes,
-        filename=f"purchase_{purchase_id}.pdf"
+        filename=f"purchase_agreement_{purchase_id}.pdf"
     )
 
     try:
         await message.answer_document(
             document=file,
-            caption=f"📄 Purchase agreement #{purchase_id}"
+            caption=f"📄 Purchase Agreement #{purchase_id}"
         )
         logger.info(f"Purchase document sent to user {user.userID} for purchase {purchase_id_int}")
     except Exception as e:
@@ -518,52 +526,43 @@ async def handle_certificate_deep_link(
 ):
     """
     Handle /start certificate_ID deep link.
-    Generates certificate for project.
+    Generates and sends certificate PDF.
 
-    Flow (as in old Talentir):
-    1. Get project_id from deep link
-    2. Find ANY purchase for this project by user
-    3. Call generate_document() with purchase_id (it accepts purchaseID, not projectID)
-    4. Send PDF to user
+    Note: generate_document() needs purchase_id, not project_id.
+    We find any purchase for this project to get the certificate.
     """
     logger.info(f"Certificate deep link: user={user.telegramID}, project={project_id}")
 
     try:
-        # Convert project_id to int
         project_id_int = int(project_id)
     except ValueError:
-        logger.error(f"Invalid project_id: {project_id}")
-        await message.answer("❌ Invalid project ID")
+        await message.answer("❌ Invalid project ID.")
         return
 
     # Find ANY purchase for this project by user
-    # generate_document() needs purchaseID, but certificate is for whole project
+    # generate_document() needs purchaseID to find project/option data
     purchase = session.query(Purchase).filter_by(
         userID=user.userID,
         projectID=project_id_int
     ).first()
 
     if not purchase:
-        logger.warning(f"No purchases found for user {user.userID} in project {project_id_int}")
-        await message.answer("❌ No purchases found for this project")
+        await message.answer("❌ No purchases found for this project.")
         return
 
-    # Generate PDF using purchase_id (generate_document needs it to find project/option)
-    # document_type='certificate' tells it to generate certificate, not purchase agreement
+    # Generate PDF (synchronous function!)
     pdf_bytes = generate_document(
         session=session,
         user=user,
         document_type='certificate',
-        document_id=purchase.purchaseID  # <-- Pass purchase_id, function will find project from it
+        document_id=purchase.purchaseID
     )
 
     if not pdf_bytes:
-        logger.error(f"Failed to generate certificate for project {project_id_int}")
         await message.answer("❌ Failed to generate certificate. Please try again later.")
         return
 
     # Create file from bytes and send
-    # Filename format: certificate_{project_id}.pdf (as in old Talentir)
     file = BufferedInputFile(
         file=pdf_bytes,
         filename=f"certificate_{project_id}.pdf"
@@ -698,6 +697,10 @@ async def handle_old_email_verification(
             update=message
         )
 
+
+# =============================================================================
+# BACK TO DASHBOARD
+# =============================================================================
 
 @start_router.callback_query(F.data == "/dashboard/existingUser")
 async def back_to_dashboard(
