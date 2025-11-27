@@ -1,10 +1,46 @@
+# sync_system/sync_config.py
 """
 Конфигурация системы синхронизации БД <-> Google Sheets
 Обновлено для новой структуры с JSON полями и MLM
 """
+from typing import Optional
 
 from models import User, Payment, Purchase, Bonus, Transfer, ActiveBalance, PassiveBalance
-import config
+
+
+# =============================================================================
+# LAZY CONFIG ACCESS
+# =============================================================================
+
+def get_default_referrer_id() -> Optional[int]:
+    """
+    Get DEFAULT_REFERRER_ID lazily (after Config.initialize_from_env()).
+    """
+    from config import Config
+    value = Config.get(Config.DEFAULT_REFERRER_ID)
+    if value:
+        return int(value)
+    return None
+
+
+def get_upline_special_rules() -> dict:
+    """
+    Get upline special rules with lazy-loaded DEFAULT_REFERRER_ID.
+    Called at runtime, not at import time.
+    """
+    default_ref = get_default_referrer_id()
+    return {
+        'never_empty': True,
+        'default_value': default_ref,
+        'no_self_reference': True,
+        'check_exists': True,
+        'stop_recursion_at': default_ref
+    }
+
+
+# =============================================================================
+# SYNC CONFIGURATION
+# =============================================================================
 
 SYNC_CONFIG = {
     'Users': {
@@ -15,7 +51,7 @@ SYNC_CONFIG = {
         'readonly_fields': [
             'userID', 'telegramID', 'createdAt',
             'balanceActive', 'balancePassive',
-            # MLM поля только для чтения
+            # MLM fields (read-only)
             'rank', 'isActive', 'teamVolumeTotal'
         ],
 
@@ -23,7 +59,7 @@ SYNC_CONFIG = {
             'email', 'firstname', 'surname', 'birthday', 'address',
             'phoneNumber', 'city', 'country', 'passport',
             'lang', 'status', 'upline', 'lastActive',
-            # JSON поля как строки
+            # JSON fields as strings
             'personalData', 'emailVerification', 'settings',
             'mlmStatus', 'mlmVolumes'
         ],
@@ -32,9 +68,9 @@ SYNC_CONFIG = {
             'email', 'firstname', 'surname', 'phoneNumber',
             'lastActive', 'status', 'upline',
             'balanceActive', 'balancePassive',
-            # MLM поля
+            # MLM fields
             'rank', 'isActive', 'teamVolumeTotal',
-            # JSON поля
+            # JSON fields
             'personalData', 'emailVerification', 'settings',
             'mlmStatus', 'mlmVolumes'
         ],
@@ -42,7 +78,7 @@ SYNC_CONFIG = {
         'required_fields': ['userID', 'telegramID'],
 
         'foreign_keys': {
-            'upline': ('Users', 'telegramID')  # Ссылается на telegramID
+            'upline': ('Users', 'telegramID')
         },
 
         'field_validators': {
@@ -50,13 +86,13 @@ SYNC_CONFIG = {
             'phoneNumber': 'phone',
             'birthday': 'date',
             'upline': 'special_upliner',
-            # JSON поля
+            # JSON fields
             'personalData': 'json_string',
             'emailVerification': 'json_string',
             'settings': 'json_string',
             'mlmStatus': 'json_string',
             'mlmVolumes': 'json_string',
-            # MLM поля
+            # MLM fields
             'rank': ['start', 'builder', 'growth', 'leadership', 'director'],
             'isActive': 'boolean',
             'teamVolumeTotal': 'decimal',
@@ -64,14 +100,9 @@ SYNC_CONFIG = {
             'balancePassive': 'decimal'
         },
 
-        'special_rules': {
-            'upline': {
-                'never_empty': True,
-                'default_value': config.DEFAULT_REFERRER_ID,
-                'no_self_reference': True,
-                'check_exists': True,
-                'stop_recursion_at': config.DEFAULT_REFERRER_ID
-            }
+        # NOTE: special_rules['upline'] loaded lazily via get_upline_special_rules()
+        'special_rules_getter': {
+            'upline': get_upline_special_rules
         }
     },
 
@@ -83,7 +114,6 @@ SYNC_CONFIG = {
         'readonly_fields': [
             'paymentID', 'userID', 'createdAt', 'updatedAt',
             'firstname', 'surname',
-            # AuditMixin поля
             'ownerTelegramID', 'ownerEmail'
         ],
 
@@ -113,7 +143,7 @@ SYNC_CONFIG = {
         'field_validators': {
             'amount': 'decimal',
             'status': ['pending', 'check', 'confirmed', 'rejected', 'cancelled'],
-            'direction': ['in', 'out'],  # Обновлено согласно модели
+            'direction': ['in', 'out'],
             'confirmationTime': 'datetime'
         }
     },
@@ -126,7 +156,6 @@ SYNC_CONFIG = {
         'readonly_fields': [
             'purchaseID', 'userID', 'projectID', 'optionID',
             'createdAt', 'updatedAt',
-            # AuditMixin поля
             'ownerTelegramID', 'ownerEmail'
         ],
 
@@ -135,7 +164,7 @@ SYNC_CONFIG = {
             'packQty', 'packPrice'
         ],
 
-        'export_updates': [],  # Покупки не обновляем при экспорте
+        'export_updates': [],
 
         'required_fields': [
             'purchaseID', 'userID', 'projectID', 'projectName',
@@ -160,9 +189,7 @@ SYNC_CONFIG = {
         'readonly_fields': [
             'bonusID', 'userID', 'downlineID', 'purchaseID',
             'projectID', 'optionID', 'createdAt', 'updatedAt',
-            # AuditMixin поля
             'ownerTelegramID', 'ownerEmail',
-            # MLM поля
             'commissionType', 'uplineLevel', 'fromRank', 'sourceRank',
             'packQty', 'packPrice'
         ],
@@ -203,7 +230,6 @@ SYNC_CONFIG = {
             'transferID', 'senderUserID', 'receiverUserID',
             'createdAt', 'updatedAt',
             'senderFirstname', 'receiverFirstname',
-            # AuditMixin поля
             'ownerTelegramID', 'ownerEmail'
         ],
 
@@ -236,12 +262,11 @@ SYNC_CONFIG = {
     'ActiveBalance': {
         'sheet_name': 'ActiveBalance',
         'model': ActiveBalance,
-        'primary_key': 'activeBalanceID',  # Исправлено с paymentID
+        'primary_key': 'activeBalanceID',
 
         'readonly_fields': [
             'activeBalanceID', 'userID', 'createdAt', 'updatedAt',
             'firstname',
-            # AuditMixin поля
             'ownerTelegramID', 'ownerEmail'
         ],
 
@@ -274,12 +299,11 @@ SYNC_CONFIG = {
     'PassiveBalance': {
         'sheet_name': 'PassiveBalance',
         'model': PassiveBalance,
-        'primary_key': 'passiveBalanceID',  # Исправлено с paymentID
+        'primary_key': 'passiveBalanceID',
 
         'readonly_fields': [
             'passiveBalanceID', 'userID', 'createdAt', 'updatedAt',
             'firstname',
-            # AuditMixin поля
             'ownerTelegramID', 'ownerEmail'
         ],
 
@@ -304,49 +328,73 @@ SYNC_CONFIG = {
     }
 }
 
-# Вспомогательные функции
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
 def validate_upliner(upline_value: int, user_telegram_id: int, session) -> int:
     """
-    Валидация uplinerID с учетом бизнес-логики
+    Validate uplinerID with business logic.
     """
-    # Пустой upline - ОШИБКА
     if not upline_value:
         raise ValueError(f"Empty upline for user {user_telegram_id}")
 
-    # DEFAULT_REFERRER может ссылаться сам на себя - это ОК!
-    if user_telegram_id == config.DEFAULT_REFERRER_ID and upline_value == config.DEFAULT_REFERRER_ID:
+    default_ref = get_default_referrer_id()
+
+    # DEFAULT_REFERRER can reference itself
+    if user_telegram_id == default_ref and upline_value == default_ref:
         return upline_value
 
-    # Остальные не могут ссылаться на себя
+    # Others cannot self-reference
     if upline_value == user_telegram_id:
         raise ValueError(f"User {user_telegram_id} has self-reference as upline")
 
-    # Проверяем существование
-    from models import User
+    # Check existence
     upliner = session.query(User).filter_by(telegramID=upline_value).first()
     if not upliner:
         raise ValueError(f"Invalid upline {upline_value}: does not exist")
 
     return upline_value
 
+
+def get_special_rules(table_name: str, field_name: str) -> dict:
+    """
+    Get special rules for a field, supporting lazy loading.
+    """
+    table_config = SYNC_CONFIG.get(table_name, {})
+
+    # Check for lazy getter first
+    getter = table_config.get('special_rules_getter', {}).get(field_name)
+    if getter and callable(getter):
+        return getter()
+
+    # Fallback to static rules
+    return table_config.get('special_rules', {}).get(field_name, {})
+
+
 def get_editable_fields(table_name: str) -> list:
-    """Получить список полей, которые можно редактировать"""
+    """Get list of editable fields."""
     return SYNC_CONFIG.get(table_name, {}).get('editable_fields', [])
 
+
 def get_readonly_fields(table_name: str) -> list:
-    """Получить список полей только для чтения"""
+    """Get list of readonly fields."""
     return SYNC_CONFIG.get(table_name, {}).get('readonly_fields', [])
 
+
 def is_field_editable(table_name: str, field_name: str) -> bool:
-    """Проверить, можно ли редактировать поле"""
+    """Check if field is editable."""
     return field_name in get_editable_fields(table_name)
 
+
 def get_table_model(table_name: str):
-    """Получить модель SQLAlchemy для таблицы"""
+    """Get SQLAlchemy model for table."""
     return SYNC_CONFIG.get(table_name, {}).get('model')
 
-def validate_foreign_key(table_name: str, field_name: str, value: any, session) -> bool:
-    """Проверить существование foreign key"""
+
+def validate_foreign_key(table_name: str, field_name: str, value, session) -> bool:
+    """Check if foreign key exists."""
     fk_config = SYNC_CONFIG.get(table_name, {}).get('foreign_keys', {}).get(field_name)
     if not fk_config:
         return True
@@ -362,11 +410,23 @@ def validate_foreign_key(table_name: str, field_name: str, value: any, session) 
 
     return exists
 
-# Категории таблиц
-SUPPORT_TABLES = ['Users', 'Payments', 'Purchases', 'Bonuses', 'Transfers', 'ActiveBalance', 'PassiveBalance']
-ADMIN_ONLY_TABLES = ['Projects', 'Options']  # Только через &upro
 
-# Режимы импорта
+# =============================================================================
+# TABLE CATEGORIES
+# =============================================================================
+
+SUPPORT_TABLES = [
+    'Users', 'Payments', 'Purchases', 'Bonuses',
+    'Transfers', 'ActiveBalance', 'PassiveBalance'
+]
+
+ADMIN_ONLY_TABLES = ['Projects', 'Options']  # Only via &upro
+
+
+# =============================================================================
+# IMPORT MODES
+# =============================================================================
+
 IMPORT_MODES = {
     'dry': {
         'description': 'Проверка без изменений',

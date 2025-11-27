@@ -167,7 +167,7 @@ class InvoiceCleaner:
                         session.query(Notification)
                         .filter(
                             Notification.source == "invoice_cleaner",
-                            Notification.target_value == str(invoice.userID),
+                            Notification.targetValue == str(invoice.userID),
                             Notification.text.like(f"%{invoice.paymentID}%")
                         ).count()
                     )

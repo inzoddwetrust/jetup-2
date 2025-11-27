@@ -525,12 +525,12 @@ class CommissionService:
                 source="mlm_system",
                 text=text,
                 buttons=buttons,
-                target_type="user",
-                target_value=str(commission["userId"]),
+                targetType="user",
+                targetValue=str(commission["userId"]),
                 priority=2,
                 category="mlm",
                 importance="medium",
-                parse_mode="HTML"
+                parseMode="HTML"
             )
 
             self.session.add(notification)

@@ -341,12 +341,12 @@ async def _send_pioneer_bonus_notification(session, purchase: Purchase):
             source="mlm_system",
             text=text,
             buttons=buttons,
-            target_type="user",
-            target_value=str(user.userID),
+            targetType="user",
+            targetValue=str(user.userID),
             priority=2,
             category="mlm",
             importance="high",
-            parse_mode="HTML"
+            parseMode="HTML"
         )
 
         session.add(notification)
@@ -391,12 +391,12 @@ async def _send_grace_day_notification(session, purchase: Purchase):
             source="mlm_system",
             text=text,
             buttons=buttons,
-            target_type="user",
-            target_value=str(user.userID),
+            targetType="user",
+            targetValue=str(user.userID),
             priority=2,
             category="mlm",
             importance="medium",
-            parse_mode="HTML"
+            parseMode="HTML"
         )
 
         session.add(notification)
@@ -465,12 +465,12 @@ async def _send_investment_bonus_notification(
             source="mlm_system",
             text=text,
             buttons=buttons,
-            target_type="user",
-            target_value=str(user.userID),
+            targetType="user",
+            targetValue=str(user.userID),
             priority=2,
             category="mlm",
             importance="high",
-            parse_mode="HTML"
+            parseMode="HTML"
         )
 
         session.add(notification)

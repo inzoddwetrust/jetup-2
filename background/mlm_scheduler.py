@@ -533,12 +533,12 @@ class MLMScheduler:
                             source="mlm_system",
                             text=text,
                             buttons=buttons,
-                            target_type="user",
-                            target_value=str(bonus.userID),
+                            targetType="user",
+                            targetValue=str(bonus.userID),
                             priority=2,
                             category="mlm",
                             importance="high",
-                            parse_mode="HTML"
+                            parseMode="HTML"
                         )
 
                         session.add(notification)

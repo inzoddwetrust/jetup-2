@@ -215,6 +215,29 @@ class ChainWalker:
         self.walk_downline(user, counter, max_depth)
         return count[0]
 
+    def count_active_downline(self, user: User, max_depth: int = 50) -> int:
+        """
+        Count active users in entire downline structure.
+
+        Active partner = user with isActive == True anywhere in downline.
+        Uses walk_downline for safe recursive traversal.
+
+        Args:
+            user: Starting user
+            max_depth: Maximum depth for recursion
+
+        Returns:
+            Count of users with isActive == True
+        """
+        count = [0]  # Use list to allow modification in callback
+
+        def counter(downline_user, level):
+            if downline_user.isActive:
+                count[0] += 1
+
+        self.walk_downline(user, counter, max_depth)
+        return count[0]
+
     def validate_default_referrer(self) -> bool:
         """
         Validate that DEFAULT_REFERRER exists and has upline=self.

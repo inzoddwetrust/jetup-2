@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Optional, Dict
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.orm.attributes import flag_modified
 import logging
 
 from models.user import User
@@ -57,11 +58,11 @@ class RankService:
         """
         try:
             rankEnum = Rank(rank)
-            requirements = RANK_CONFIG()[rankEnum]  # ✅ CHANGED: Added ()
+            requirements = RANK_CONFIG()[rankEnum]
         except (ValueError, KeyError):
             return False
 
-        # ✅ FIX: Use qualifying volume with 50% rule from totalVolume JSON
+        # Use qualifying volume with 50% rule from totalVolume JSON
         if user.totalVolume and isinstance(user.totalVolume, dict):
             qualifying_volume = Decimal(str(user.totalVolume.get("qualifyingVolume", 0)))
         else:
@@ -82,7 +83,7 @@ class RankService:
             )
             return False
 
-        # Check active partners
+        # Check active partners (counts ENTIRE structure, not just level 1)
         activePartners = await self._countActivePartners(user)
         required_partners = requirements["activePartnersRequired"]
 
@@ -102,14 +103,32 @@ class RankService:
         return True
 
     async def _countActivePartners(self, user: User) -> int:
-        """Count active partners in user's structure."""
-        # Count only direct referrals who are active
-        activeCount = self.session.query(func.count(User.userID)).filter(
-            User.upline == user.telegramID,
-            User.isActive == True
-        ).scalar() or 0
+        """
+        Count active partners in user's ENTIRE structure.
 
-        return activeCount
+        Active partner = user with isActive == True anywhere in downline.
+        Uses ChainWalker for safe recursive traversal.
+
+        Args:
+            user: User to count active partners for
+
+        Returns:
+            Count of active users in entire downline
+        """
+        from mlm_system.utils.chain_walker import ChainWalker
+
+        walker = ChainWalker(self.session)
+        return walker.count_active_downline(user)
+
+    async def _countTotalTeamSize(self, user: User) -> int:
+        """
+        Count total team size recursively.
+        Uses ChainWalker for safe downline traversal.
+        """
+        from mlm_system.utils.chain_walker import ChainWalker
+
+        walker = ChainWalker(self.session)
+        return walker.count_downline(user)
 
     async def updateUserRank(self, userId: int, newRank: str, method: str = "natural") -> bool:
         """
@@ -153,7 +172,6 @@ class RankService:
             user.mlmStatus = {}
         user.mlmStatus["rankQualifiedAt"] = timeMachine.now.isoformat()
 
-        from sqlalchemy.orm.attributes import flag_modified
         flag_modified(user, 'mlmStatus')
 
         self.session.commit()
@@ -177,7 +195,11 @@ class RankService:
         """
         # Check if assigner is a founder
         founder = self.session.query(User).filter_by(userID=founderId).first()
-        if not founder or not founder.mlmStatus.get("isFounder", False):
+        if not founder:
+            logger.error(f"Founder {founderId} not found")
+            return False
+
+        if not founder.mlmStatus or not founder.mlmStatus.get("isFounder", False):
             logger.error(f"User {founderId} is not a founder, cannot assign ranks")
             return False
 
@@ -186,6 +208,8 @@ class RankService:
         if not user:
             logger.error(f"User {userId} not found")
             return False
+
+        oldRank = user.rank
 
         # Assign rank
         user.rank = newRank
@@ -196,13 +220,12 @@ class RankService:
         user.mlmStatus["assignedBy"] = founderId
         user.mlmStatus["assignedAt"] = timeMachine.now.isoformat()
 
-        from sqlalchemy.orm.attributes import flag_modified
         flag_modified(user, 'mlmStatus')
 
         # Record in history
         history = RankHistory(
             userID=userId,
-            oldRank=user.rank,
+            oldRank=oldRank,
             newRank=newRank,
             qualificationMethod="assigned",
             qualifiedAt=timeMachine.now,
@@ -219,10 +242,14 @@ class RankService:
     async def getUserActiveRank(self, userId: int) -> str:
         """
         Get user's currently active rank.
-        Assigned ranks take priority, but must still be maintained monthly.
+        Assigned ranks take priority, but user must be active.
         """
         user = self.session.query(User).filter_by(userID=userId).first()
         if not user:
+            return "start"
+
+        # If user is not active, they can't use their rank
+        if not user.isActive:
             return "start"
 
         # Check if user has assigned rank
@@ -242,43 +269,89 @@ class RankService:
         # Return natural rank
         return user.rank or "start"
 
+    async def updateMonthlyActivity(self, userId: int) -> bool:
+        """Update user's monthly activity status."""
+        user = self.session.query(User).filter_by(userID=userId).first()
+        if not user:
+            return False
+
+        # Check monthly PV
+        monthlyPV = Decimal("0")
+        if user.mlmVolumes:
+            monthlyPV = Decimal(user.mlmVolumes.get("monthlyPV", "0"))
+
+        # Update activity status
+        isActive = monthlyPV >= Decimal("200")
+        user.isActive = isActive
+
+        if not user.mlmStatus:
+            user.mlmStatus = {}
+        user.mlmStatus["lastActiveMonth"] = timeMachine.currentMonth if isActive else None
+
+        flag_modified(user, 'mlmStatus')
+
+        logger.info(f"User {userId} activity updated: {isActive} (PV: {monthlyPV})")
+        return True
+
+    async def checkAllRanks(self) -> Dict[str, int]:
+        """Check and update ranks for all users."""
+        results = {
+            "checked": 0,
+            "updated": 0,
+            "errors": 0
+        }
+
+        users = self.session.query(User).all()
+
+        for user in users:
+            try:
+                results["checked"] += 1
+
+                # Check for new rank qualification
+                newRank = await self.checkRankQualification(user.userID)
+                if newRank:
+                    success = await self.updateUserRank(
+                        user.userID,
+                        newRank,
+                        "natural"
+                    )
+                    if success:
+                        results["updated"] += 1
+            except Exception as e:
+                logger.error(f"Error checking rank for user {user.userID}: {e}")
+                results["errors"] += 1
+
+        self.session.commit()
+
+        logger.info(
+            f"Rank check complete: checked={results['checked']}, "
+            f"updated={results['updated']}, errors={results['errors']}"
+        )
+
+        return results
+
     def _compareRanks(self, rank1: str, rank2: str) -> int:
         """
         Compare two ranks.
         Returns: -1 if rank1 < rank2, 0 if equal, 1 if rank1 > rank2
         """
-        rank_config = RANK_CONFIG()  # ✅ CHANGED: Added ()
+        rankOrder = {
+            "start": 0,
+            "builder": 1,
+            "growth": 2,
+            "leadership": 3,
+            "director": 4
+        }
 
-        # Get team volume requirements for comparison
-        try:
-            tv1 = rank_config[Rank(rank1)]["teamVolumeRequired"]
-            tv2 = rank_config[Rank(rank2)]["teamVolumeRequired"]
+        value1 = rankOrder.get(rank1, 0)
+        value2 = rankOrder.get(rank2, 0)
 
-            if tv1 < tv2:
-                return -1
-            elif tv1 > tv2:
-                return 1
-            else:
-                return 0
-        except (ValueError, KeyError):
-            # Fallback to old hardcoded order
-            rankOrder = {
-                "start": 0,
-                "builder": 1,
-                "growth": 2,
-                "leadership": 3,
-                "director": 4
-            }
-
-            value1 = rankOrder.get(rank1, 0)
-            value2 = rankOrder.get(rank2, 0)
-
-            if value1 < value2:
-                return -1
-            elif value1 > value2:
-                return 1
-            else:
-                return 0
+        if value1 < value2:
+            return -1
+        elif value1 > value2:
+            return 1
+        else:
+            return 0
 
     async def saveMonthlyStats(self, userId: int) -> bool:
         """Save monthly statistics snapshot for user."""
@@ -322,7 +395,7 @@ class RankService:
             userID=userId,
             month=currentMonth,
             personalVolume=monthlyPV,
-            teamVolume=qualifying_tv,  # ✅ FIX: Use qualifying volume
+            teamVolume=qualifying_tv,
             activePartnersCount=await self._countActivePartners(user),
             directReferralsCount=self.session.query(func.count(User.userID)).filter(
                 User.upline == user.telegramID
@@ -339,17 +412,3 @@ class RankService:
 
         logger.info(f"Monthly stats saved for user {userId}, month {currentMonth}")
         return True
-
-    async def _countTotalTeamSize(self, user: User) -> int:
-        """
-        Count total team size recursively.
-        Uses ChainWalker for safe downline traversal.
-        """
-        from mlm_system.utils.chain_walker import ChainWalker
-
-        walker = ChainWalker(self.session)
-
-        # Use walker to count all downline
-        total_count = walker.count_downline(user)
-
-        return total_count

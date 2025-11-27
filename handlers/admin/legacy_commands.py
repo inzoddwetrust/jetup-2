@@ -21,7 +21,6 @@ from config import Config
 from core.message_manager import MessageManager
 from core.di import get_service
 from models.user import User
-from services.imports import import_projects_and_options
 from email_system import EmailService
 
 logger = logging.getLogger(__name__)
@@ -31,70 +30,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 legacy_router = Router(name="admin_legacy")
-
-
-# =============================================================================
-# CONFIGURATION COMMANDS
-# =============================================================================
-
-@legacy_router.message(F.text == '&upconfig')
-async def cmd_upconfig(
-        message: Message,
-        user: User,
-        session: Session,
-        message_manager: MessageManager
-):
-    """
-    Update configuration: reload Projects, Options, and refresh statistics.
-
-    TODO: This command currently imports Projects/Options.
-          It should be split into:
-          - &upconfig → Config variables only
-          - &upro → Projects + Options + BookStack cache
-    """
-    logger.info(f"Admin {message.from_user.id} triggered &upconfig")
-
-    status_msg = await message.answer("🔄 Updating configuration...")
-
-    try:
-        # Import Projects and Options
-        import_result = await import_projects_and_options()
-
-        if import_result["success"]:
-            result_text = (
-                "✅ Configuration updated!\n\n"
-                f"📦 Projects:\n"
-                f"  • Added: {import_result['projects']['added']}\n"
-                f"  • Updated: {import_result['projects']['updated']}\n"
-                f"  • Errors: {import_result['projects']['errors']}\n\n"
-                f"🎯 Options:\n"
-                f"  • Added: {import_result['options']['added']}\n"
-                f"  • Updated: {import_result['options']['updated']}\n"
-                f"  • Errors: {import_result['options']['errors']}\n"
-            )
-
-            # Show errors if any
-            if import_result["error_messages"]:
-                error_summary = "\n".join(import_result["error_messages"][:5])
-                result_text += f"\n⚠️ Errors:\n{error_summary}"
-                if len(import_result["error_messages"]) > 5:
-                    result_text += f"\n...and {len(import_result['error_messages']) - 5} more"
-        else:
-            result_text = "❌ Configuration update failed!"
-            if import_result["error_messages"]:
-                error_summary = "\n".join(import_result["error_messages"][:3])
-                result_text += f"\n\nErrors:\n{error_summary}"
-
-        # Refresh dynamic statistics (no need for StatsService check)
-        await Config.refresh_all_dynamic()
-        result_text += "\n\n📊 Statistics refreshed"
-
-        await status_msg.edit_text(result_text)
-
-    except Exception as e:
-        logger.error(f"Error in &upconfig: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Error: {str(e)}")
-
 
 # =============================================================================
 # STATS COMMAND

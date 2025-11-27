@@ -91,7 +91,6 @@ class MessageManager:
                 logger.error(f"Failed to prepare template for {template_key}")
                 return None
 
-            # CORRECT unpacking: text, media_id, keyboard, parse_mode, disable_preview, preaction, postaction
             text, media_id, keyboard, parse_mode_str, disable_preview, preaction, postaction = template_data
             parse_mode = self._parse_mode_to_enum(parse_mode_str)
 

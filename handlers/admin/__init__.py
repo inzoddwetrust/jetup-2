@@ -5,12 +5,10 @@ Modular architecture with specialized sub-modules.
 
 Structure:
     __init__.py          - Router setup, middleware, exports
+    config_commands.py   - &upconfig, &upro, &ut
+    import_commands.py   - &import, &restore
     payment_commands.py  - Payment approval/rejection callbacks
-    config_commands.py   - &upconfig, &upro, &ut (TODO)
-    stats_commands.py    - &stats, &testmail (TODO)
-    import_commands.py   - &import, &legacy (TODO)
-    balance_commands.py  - &addbalance, &delpurchase (TODO)
-    utils_commands.py    - &time, &user, &help (TODO)
+    legacy_commands.py   - Temporary: &stats, &testmail (to be split later)
 """
 import logging
 from typing import Any, Callable, Awaitable
@@ -27,7 +25,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # ADMIN MIDDLEWARE
 # =============================================================================
-
 
 class AdminMiddleware(BaseMiddleware):
     """
@@ -95,26 +92,16 @@ admin_router = Router(name="admin")
 # IMPORT SUB-ROUTERS
 # =============================================================================
 
+from .config_commands import config_router
+from .import_commands import import_router
 from .payment_commands import payment_router
 from .legacy_commands import legacy_router
 
-# Include sub-routers
+# Include sub-routers (order matters for command matching)
+admin_router.include_router(config_router)
+admin_router.include_router(import_router)
 admin_router.include_router(payment_router)
-admin_router.include_router(legacy_router)  # Temporary: existing commands
-
-
-# TODO: Add more sub-routers as they are created:
-# from .config_commands import config_router
-# from .stats_commands import stats_router
-# from .import_commands import import_router
-# from .balance_commands import balance_router
-# from .utils_commands import utils_router
-#
-# admin_router.include_router(config_router)
-# admin_router.include_router(stats_router)
-# admin_router.include_router(import_router)
-# admin_router.include_router(balance_router)
-# admin_router.include_router(utils_router)
+admin_router.include_router(legacy_router)  # Temporary: &stats, &testmail, unknown handler
 
 
 # =============================================================================

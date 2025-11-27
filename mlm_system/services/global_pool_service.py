@@ -261,12 +261,12 @@ class GlobalPoolService:
                     source="mlm_system",
                     text=text,
                     buttons=buttons,
-                    target_type="user",
-                    target_value=str(userId),
+                    targetType="user",
+                    targetValue=str(userId),
                     priority=2,
                     category="mlm",
                     importance="high",
-                    parse_mode="HTML"
+                    parseMode="HTML"
                 )
 
                 self.session.add(notification)
