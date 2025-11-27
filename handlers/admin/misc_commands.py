@@ -15,11 +15,15 @@ from aiogram import Router, F
 from aiogram.types import Message
 from sqlalchemy.orm import Session
 
+from decimal import Decimal
+from sqlalchemy import func
+
 from config import Config
 from core.message_manager import MessageManager
 from core.di import get_service
 from models.user import User
-from services.stats_service import StatsService
+from models.payment import Payment
+from models.purchase import Purchase
 from email_system import EmailService
 
 logger = logging.getLogger(__name__)
@@ -34,27 +38,39 @@ async def cmd_stats(
         session: Session,
         message_manager: MessageManager
 ):
-    """Show bot statistics."""
+    """Show bot statistics using Config.get_dynamic() for global stats."""
     logger.info(f"Admin {message.from_user.id} requested &stats")
 
     reply = await message.reply("📊 Собираю статистику...")
 
     try:
-        stats_service = get_service(StatsService)
-        stats = await stats_service.get_full_stats()
+        # Get global stats from Config.get_dynamic()
+        users_count = await Config.get_dynamic(Config.USERS_COUNT) or 0
+        projects_count = await Config.get_dynamic(Config.PROJECTS_COUNT) or 0
+        invested_total = await Config.get_dynamic(Config.INVESTED_TOTAL) or Decimal("0")
+
+        # Get additional stats directly from DB
+        active_users = session.query(func.count(User.userID)).filter(
+            User.isActive == True
+        ).scalar() or 0
+
+        pending_payments = session.query(func.count(Payment.paymentID)).filter(
+            Payment.status == "check"
+        ).scalar() or 0
+
+        total_purchases = session.query(func.count(Purchase.purchaseID)).scalar() or 0
 
         report = (
             f"📊 <b>Bot Statistics</b>\n\n"
             f"👥 <b>Users:</b>\n"
-            f"  Total: {stats.get('total_users', 0)}\n"
-            f"  Active (30d): {stats.get('active_users_30d', 0)}\n"
-            f"  Active Partners: {stats.get('active_partners', 0)}\n\n"
+            f"  Total: {users_count}\n"
+            f"  Active: {active_users}\n\n"
             f"💰 <b>Finances:</b>\n"
-            f"  Total deposits: ${stats.get('total_deposits', 0):.2f}\n"
-            f"  Pending payments: {stats.get('pending_payments', 0)}\n\n"
-            f"📈 <b>Purchases:</b>\n"
-            f"  Total: {stats.get('total_purchases', 0)}\n"
-            f"  Total volume: ${stats.get('total_volume', 0):.2f}\n\n"
+            f"  Total invested: ${invested_total:.2f}\n"
+            f"  Pending payments: {pending_payments}\n\n"
+            f"📈 <b>Projects & Purchases:</b>\n"
+            f"  Projects: {projects_count}\n"
+            f"  Total purchases: {total_purchases}\n\n"
             f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
         )
 
