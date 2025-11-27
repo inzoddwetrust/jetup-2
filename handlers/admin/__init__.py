@@ -1,21 +1,14 @@
 # handlers/admin/__init__.py
 """
-Administrative commands module for Jetup bot.
-Modular architecture with specialized sub-modules.
-
-Structure:
-    __init__.py          - Router setup, middleware, exports
-    config_commands.py   - &upconfig, &upro, &ut
-    import_commands.py   - &import, &restore
-    payment_commands.py  - Payment approval/rejection callbacks
-    legacy_commands.py   - Temporary: &stats, &testmail (to be split later)
+Admin commands module.
+Modular structure with specialized sub-routers.
 """
 import logging
-from typing import Any, Callable, Awaitable
+from typing import Any, Callable, Dict, Awaitable
 
 from aiogram import Router, Bot, Dispatcher
 from aiogram.types import Message, CallbackQuery, TelegramObject
-from aiogram import BaseMiddleware
+from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
 from config import Config
 
@@ -28,11 +21,7 @@ logger = logging.getLogger(__name__)
 
 class AdminMiddleware(BaseMiddleware):
     """
-    Middleware to check admin permissions.
-
-    Applied to admin router - blocks non-admin users from:
-    - Commands starting with '&'
-    - Admin-specific callbacks
+    Middleware to check admin access for all admin router handlers.
     """
 
     def __init__(self, bot: Bot):
@@ -41,43 +30,36 @@ class AdminMiddleware(BaseMiddleware):
 
     async def __call__(
             self,
-            handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+            handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
             event: TelegramObject,
-            data: dict[str, Any]
+            data: Dict[str, Any]
     ) -> Any:
-        # Inject bot into data
-        data["bot"] = self.bot
-
-        if isinstance(event, (Message, CallbackQuery)):
+        # Get user_id from event
+        if isinstance(event, Message):
             user_id = event.from_user.id
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id
+        else:
+            return await handler(event, data)
 
-            # Log admin command attempts
-            if isinstance(event, Message) and event.text and event.text.startswith('&'):
-                logger.info(f"AdminMiddleware: processing command '{event.text}' from user {user_id}")
+        # Check admin access
+        admin_ids = Config.get(Config.ADMIN_USER_IDS) or []
 
-            # Get user from data (injected by UserMiddleware)
-            user = data.get('user')
-            if not user:
-                logger.warning(f"User object not found for {user_id}")
-                return None
+        if user_id not in admin_ids:
+            logger.warning(f"Non-admin {user_id} tried to access admin command")
 
-            # Check if user is ADMIN
-            admin_ids = Config.get(Config.ADMIN_USER_IDS, [])
-            if user_id not in admin_ids:
-                logger.warning(f"Non-admin user {user_id} attempted to access admin function")
-
-                if isinstance(event, Message) and event.text:
-                    await event.answer("⛔ You don't have permission to use admin commands.")
-                elif isinstance(event, CallbackQuery):
-                    await event.answer("⛔ Access denied", show_alert=True)
-
-                return None
-
-            # Log successful admin action
-            if isinstance(event, Message) and event.text:
-                logger.info(f"Admin {user_id} executed command: {event.text}")
+            if isinstance(event, Message):
+                await event.answer("⛔ Access denied")
             elif isinstance(event, CallbackQuery):
-                logger.info(f"Admin {user_id} triggered callback: {event.data}")
+                await event.answer("⛔ Access denied", show_alert=True)
+
+            return None
+
+        # Log admin action
+        if isinstance(event, Message) and event.text:
+            logger.info(f"Admin {user_id} executed: {event.text}")
+        elif isinstance(event, CallbackQuery):
+            logger.info(f"Admin {user_id} callback: {event.data}")
 
         return await handler(event, data)
 
@@ -88,6 +70,7 @@ class AdminMiddleware(BaseMiddleware):
 
 admin_router = Router(name="admin")
 
+
 # =============================================================================
 # IMPORT SUB-ROUTERS
 # =============================================================================
@@ -95,13 +78,17 @@ admin_router = Router(name="admin")
 from .config_commands import config_router
 from .import_commands import import_router
 from .payment_commands import payment_router
+#from .balance_commands import balance_router
 from .legacy_commands import legacy_router
+from .misc_commands import misc_router
 
-# Include sub-routers (order matters for command matching)
+# Include sub-routers (ORDER MATTERS - misc_router LAST for fallback)
 admin_router.include_router(config_router)
 admin_router.include_router(import_router)
 admin_router.include_router(payment_router)
-admin_router.include_router(legacy_router)  # Temporary: &stats, &testmail, unknown handler
+#admin_router.include_router(balance_router)
+admin_router.include_router(legacy_router)
+admin_router.include_router(misc_router)  # LAST - has fallback handler
 
 
 # =============================================================================
@@ -116,13 +103,13 @@ def setup_admin_handlers(dp: Dispatcher, bot: Bot):
         dp: Dispatcher instance
         bot: Bot instance
     """
-    logger.info("Setting up admin handlers (modular)")
+    logger.info("Setting up admin handlers")
 
-    # Apply AdminMiddleware to both message and callback handlers
+    # Apply AdminMiddleware
     admin_router.message.middleware(AdminMiddleware(bot))
     admin_router.callback_query.middleware(AdminMiddleware(bot))
 
-    # Include admin router in dispatcher
+    # Include in dispatcher
     dp.include_router(admin_router)
 
     logger.info("Admin handlers setup complete")
