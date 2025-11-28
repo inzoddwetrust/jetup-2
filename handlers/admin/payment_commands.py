@@ -202,7 +202,7 @@ async def handle_final_approval(
         session.add(active_balance_record)
 
         payer.balanceActive = (payer.balanceActive or Decimal("0")) + Decimal(str(payment.amount))
-        payment.status = "paid"
+        payment.status = "confirmed"
         payment.confirmedBy = str(callback_query.from_user.id)
         payment.confirmationTime = datetime.now(timezone.utc)
 
