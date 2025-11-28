@@ -86,7 +86,7 @@ async def cmd_stats(
 
         # Financial stats
         deposits_total = session.query(func.sum(Payment.amount)).filter(
-            Payment.status == 'paid'
+            Payment.status == 'confirmed'
         ).scalar() or Decimal('0')
 
         payments_pending = session.query(func.count(Payment.paymentID)).filter(
@@ -98,11 +98,11 @@ async def cmd_stats(
         purchases_volume = session.query(func.sum(Purchase.packPrice)).scalar() or Decimal('0')
 
         # Bonuses
-        bonuses_paid = session.query(func.sum(Bonus.amount)).filter(
+        bonuses_paid = session.query(func.sum(Bonus.bonusAmount)).filter(
             Bonus.status == 'paid'
         ).scalar() or Decimal('0')
 
-        bonuses_pending = session.query(func.sum(Bonus.amount)).filter(
+        bonuses_pending = session.query(func.sum(Bonus.bonusAmount)).filter(
             Bonus.status == 'pending'
         ).scalar() or Decimal('0')
 
@@ -194,22 +194,21 @@ async def cmd_user(
     purchases_sum = session.query(func.sum(Purchase.packPrice)).filter_by(
         userID=found_user.userID
     ).scalar() or Decimal('0')
-    bonuses_earned = session.query(func.sum(Bonus.amount)).filter_by(
+    bonuses_earned = session.query(func.sum(Bonus.bonusAmount)).filter_by(
         userID=found_user.userID, status='paid'
     ).scalar() or Decimal('0')
 
-    # Upline
+    # Upline (upline field stores telegramID of sponsor)
     upline_info = "None"
-    if found_user.uplinerID:
-        upline = session.query(User).filter_by(userID=found_user.uplinerID).first()
+    if found_user.upline:
+        upline = session.query(User).filter_by(telegramID=found_user.upline).first()
         if upline:
             upline_info = f"{upline.firstname} (ID: {upline.userID})"
 
-    # MLM
-    mlm_status = found_user.mlmStatus or {}
-    rank = mlm_status.get('rank', 'None')
-    is_active = "✅" if mlm_status.get('isActive') else "❌"
-    team_volume = Decimal(str((found_user.mlmVolumes or {}).get('teamVolume', 0)))
+    # MLM - use direct fields, not JSON
+    rank = found_user.rank or 'start'
+    is_active = "✅" if found_user.isActive else "❌"
+    team_volume = found_user.teamVolumeTotal or Decimal('0')
 
     await message_manager.send_template(
         user=user,
@@ -220,7 +219,7 @@ async def cmd_user(
             'firstname': found_user.firstname or '',
             'surname': found_user.surname or '',
             'email': found_user.email or 'N/A',
-            'phone': found_user.phone or 'N/A',
+            'phone': found_user.phoneNumber or 'N/A',
             'lang': found_user.lang or 'en',
             'status': found_user.status or 'active',
             'balance_active': f"{float(found_user.balanceActive or 0):,.2f}",

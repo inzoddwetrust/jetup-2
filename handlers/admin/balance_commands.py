@@ -13,7 +13,7 @@ Templates used:
 import os
 import shutil
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -250,7 +250,7 @@ async def cmd_delpurchase(
                 'purchase_id': purchase_id,
                 'firstname': purchase_user.firstname if purchase_user else 'Unknown',
                 'user_id': purchase.userID,
-                'pack_name': purchase.packName or 'N/A',
+                'pack_name': purchase.projectName or 'N/A',
                 'pack_price': f"{float(purchase.packPrice or 0):,.2f}",
                 'created_at': purchase.createdAt.strftime('%Y-%m-%d %H:%M') if purchase.createdAt else 'N/A',
                 'bonuses_count': len(bonuses),
