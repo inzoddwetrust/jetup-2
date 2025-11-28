@@ -21,7 +21,7 @@ Templates used:
 """
 import re
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
 from aiogram import Router, F
@@ -74,8 +74,12 @@ async def cmd_stats(
     try:
         # Gather statistics
         users_total = session.query(func.count(User.userID)).scalar() or 0
+
+        # Calculate 30 days ago using existing datetime import
+        thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+
         users_active = session.query(func.count(User.userID)).filter(
-            User.lastActive >= func.date('now', '-30 days')
+            User.lastActive >= thirty_days_ago
         ).scalar() or 0
 
         # Active partners (use direct field isActive, not JSON)
@@ -414,7 +418,8 @@ async def cmd_testmail(
     template_keys = ['admin/testmail/header']
     for pn in providers_status.keys():
         template_keys.append(f'admin/testmail/status_{pn}')
-    template_keys.append('admin/testmail/secure_domains' if email_service.secure_domains else 'admin/testmail/no_secure_domains')
+    template_keys.append(
+        'admin/testmail/secure_domains' if email_service.secure_domains else 'admin/testmail/no_secure_domains')
 
     target_email = custom_email or user.email
     firstname = user.firstname or "Admin"
@@ -453,7 +458,8 @@ async def cmd_testmail(
             return
         selected_provider = provider_order[0]
         domain = email_service._get_email_domain(target_email)
-        template_keys.append('admin/testmail/reason_secure' if domain in email_service.secure_domains else 'admin/testmail/reason_regular')
+        template_keys.append(
+            'admin/testmail/reason_secure' if domain in email_service.secure_domains else 'admin/testmail/reason_regular')
 
     template_keys.append('admin/testmail/sending')
 
@@ -467,10 +473,13 @@ async def cmd_testmail(
         'domain': email_service._get_email_domain(target_email)
     }
 
-    await message_manager.send_template(user=user, template_key=template_keys, variables=base_vars, update=status_msg, edit=True)
+    await message_manager.send_template(user=user, template_key=template_keys, variables=base_vars, update=status_msg,
+                                        edit=True)
 
     # Get email templates and send
-    email_subject, _ = await MessageTemplates.get_raw_template('admin/testmail/email_subject', {'provider': selected_provider.upper()}, lang=user.lang or 'en')
+    email_subject, _ = await MessageTemplates.get_raw_template('admin/testmail/email_subject',
+                                                               {'provider': selected_provider.upper()},
+                                                               lang=user.lang or 'en')
     email_body, _ = await MessageTemplates.get_raw_template('admin/testmail/email_body', {
         'firstname': firstname, 'target_email': target_email,
         'provider': selected_provider.upper(), 'time': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -482,7 +491,8 @@ async def cmd_testmail(
     final_templates = ['admin/testmail/header']
     for pn in providers_status.keys():
         final_templates.append(f'admin/testmail/status_{pn}')
-    final_templates.append('admin/testmail/secure_domains' if email_service.secure_domains else 'admin/testmail/no_secure_domains')
+    final_templates.append(
+        'admin/testmail/secure_domains' if email_service.secure_domains else 'admin/testmail/no_secure_domains')
     final_templates.append('admin/testmail/success' if success else 'admin/testmail/send_error')
 
     if success and not forced_provider:
@@ -491,7 +501,8 @@ async def cmd_testmail(
             final_templates.append('admin/testmail/fallback')
             base_vars['fallback_provider'] = po[1].upper()
 
-    await message_manager.send_template(user=user, template_key=final_templates, variables=base_vars, update=status_msg, edit=True)
+    await message_manager.send_template(user=user, template_key=final_templates, variables=base_vars, update=status_msg,
+                                        edit=True)
 
 
 # =============================================================================
@@ -695,7 +706,8 @@ async def cmd_fallback(message: Message, user: User, session: Session, message_m
 
     command = message.text.split()[0]
     logger.info(f"Admin {message.from_user.id} unknown command: {command}")
-    await message_manager.send_template(user=user, template_key='admin/commands/unknown', variables={'command': command}, update=message)
+    await message_manager.send_template(user=user, template_key='admin/commands/unknown',
+                                        variables={'command': command}, update=message)
 
 
 __all__ = ['misc_router']
