@@ -110,8 +110,8 @@ async def cmd_stats(
         time_machine_status = ""
         try:
             from mlm_system.utils.time_machine import timeMachine
-            if timeMachine.isTestMode:
-                time_machine_status = f"⏰ Time Machine: {timeMachine.now().strftime('%Y-%m-%d %H:%M')}"
+            if timeMachine._isTestMode:
+                time_machine_status = f"⏰ Time Machine: {timeMachine.now.strftime('%Y-%m-%d %H:%M')}"
         except (ImportError, AttributeError):
             time_machine_status = ""
 
@@ -268,15 +268,15 @@ async def cmd_time(
         parts = message.text.split()
 
         if len(parts) == 1:
-            mode = "🧪 TEST MODE" if timeMachine.isTestMode else "🔴 REAL TIME"
-            current = timeMachine.now()
+            mode = "🧪 TEST MODE" if timeMachine._isTestMode else "🔴 REAL TIME"
+            current = timeMachine.now
             await message_manager.send_template(
                 user=user,
                 template_key='admin/time/status',
                 variables={
                     'current_time': current.strftime('%Y-%m-%d %H:%M:%S'),
                     'current_month': current.strftime('%Y-%m'),
-                    'is_grace_day': "✅ Yes" if timeMachine.isGraceDay() else "❌ No",
+                    'is_grace_day': "✅ Yes" if timeMachine.isGraceDay else "❌ No",
                     'mode': mode
                 },
                 update=message
@@ -284,7 +284,7 @@ async def cmd_time(
             return
 
         if parts[1].lower() == 'reset':
-            timeMachine.reset()
+            timeMachine.resetToRealTime()
             logger.warning(f"Time Machine reset by admin {message.from_user.id}")
             await message_manager.send_template(user=user, template_key='admin/time/reset', update=message)
             return
@@ -445,26 +445,50 @@ async def cmd_testmail(
 
 @misc_router.message(F.text.regexp(r'^&object\s+.+'))
 async def cmd_object(message: Message, user: User, session: Session, message_manager: MessageManager):
+    """Send media by file_id to detect type."""
     if not is_admin(message.from_user.id):
         return
 
     file_id = message.text.split(maxsplit=1)[1].strip()
-    logger.info(f"Admin {message.from_user.id} testing object: {file_id[:20]}...")
+    logger.info(f"Admin {message.from_user.id} testing object: {file_id[:30]}...")
 
-    from aiogram import Bot
-    bot = get_service(Bot)
+    # Try sending as different media types
+    send_attempts = [
+        ('sticker', lambda: message.reply_sticker(sticker=file_id)),
+        ('photo', lambda: message.reply_photo(photo=file_id, caption="📷 Photo object")),
+        ('video', lambda: message.reply_video(video=file_id, caption="🎥 Video object")),
+        ('document', lambda: message.reply_document(document=file_id, caption="📄 Document object")),
+        ('animation', lambda: message.reply_animation(animation=file_id, caption="🎬 Animation object")),
+        ('audio', lambda: message.reply_audio(audio=file_id, caption="🎵 Audio object")),
+        ('voice', lambda: message.reply_voice(voice=file_id, caption="🎤 Voice object")),
+        ('video_note', lambda: message.reply_video_note(video_note=file_id))
+    ]
 
-    for media_type, method in [('photo', bot.send_photo), ('video', bot.send_video), ('document', bot.send_document),
-                                ('animation', bot.send_animation), ('audio', bot.send_audio), ('voice', bot.send_voice),
-                                ('sticker', bot.send_sticker), ('video_note', bot.send_video_note)]:
+    for media_type, send_func in send_attempts:
         try:
-            await method(chat_id=message.chat.id, **{media_type: file_id})
+            await send_func()
+            # Success - report the type
+            await message_manager.send_template(
+                user=user,
+                template_key='admin/object/success',
+                variables={'media_type': media_type},
+                update=message
+            )
+            logger.info(f"Successfully sent object as {media_type}")
             return
         except Exception:
             continue
 
-    await message_manager.send_template(user=user, template_key='admin/object/error',
-        variables={'file_id': file_id[:50] + '...' if len(file_id) > 50 else file_id, 'error': 'Could not determine media type'}, update=message)
+    # All attempts failed
+    await message_manager.send_template(
+        user=user,
+        template_key='admin/object/error',
+        variables={
+            'file_id': file_id[:50] + '...' if len(file_id) > 50 else file_id,
+            'error': 'Invalid file_id or object from another bot'
+        },
+        update=message
+    )
 
 
 @misc_router.message(F.text == '&object')
@@ -472,6 +496,126 @@ async def cmd_object_usage(message: Message, user: User, session: Session, messa
     if not is_admin(message.from_user.id):
         return
     await message_manager.send_template(user=user, template_key='admin/object/usage', update=message)
+
+
+# =============================================================================
+# MEDIA FILE_ID EXTRACTION (when admin sends photo/video/document)
+# =============================================================================
+
+@misc_router.message(F.photo)
+async def extract_photo_file_id(message: Message, user: User, session: Session, message_manager: MessageManager):
+    """Extract file_id from photo sent by admin."""
+    if not is_admin(message.from_user.id):
+        return
+
+    # Get the largest photo (last in array)
+    photo = message.photo[-1]
+    file_id = photo.file_id
+
+    await message_manager.send_template(
+        user=user,
+        template_key='admin/object/extracted',
+        variables={
+            'media_type': 'photo',
+            'file_id': file_id,
+            'width': photo.width,
+            'height': photo.height,
+            'file_size': photo.file_size or 'N/A'
+        },
+        update=message
+    )
+
+
+@misc_router.message(F.video)
+async def extract_video_file_id(message: Message, user: User, session: Session, message_manager: MessageManager):
+    """Extract file_id from video sent by admin."""
+    if not is_admin(message.from_user.id):
+        return
+
+    video = message.video
+    file_id = video.file_id
+
+    await message_manager.send_template(
+        user=user,
+        template_key='admin/object/extracted',
+        variables={
+            'media_type': 'video',
+            'file_id': file_id,
+            'width': video.width,
+            'height': video.height,
+            'file_size': video.file_size or 'N/A'
+        },
+        update=message
+    )
+
+
+@misc_router.message(F.document)
+async def extract_document_file_id(message: Message, user: User, session: Session, message_manager: MessageManager):
+    """Extract file_id from document sent by admin."""
+    if not is_admin(message.from_user.id):
+        return
+
+    doc = message.document
+    file_id = doc.file_id
+
+    await message_manager.send_template(
+        user=user,
+        template_key='admin/object/extracted',
+        variables={
+            'media_type': 'document',
+            'file_id': file_id,
+            'file_name': doc.file_name or 'N/A',
+            'mime_type': doc.mime_type or 'N/A',
+            'file_size': doc.file_size or 'N/A'
+        },
+        update=message
+    )
+
+
+@misc_router.message(F.animation)
+async def extract_animation_file_id(message: Message, user: User, session: Session, message_manager: MessageManager):
+    """Extract file_id from animation/GIF sent by admin."""
+    if not is_admin(message.from_user.id):
+        return
+
+    anim = message.animation
+    file_id = anim.file_id
+
+    await message_manager.send_template(
+        user=user,
+        template_key='admin/object/extracted',
+        variables={
+            'media_type': 'animation',
+            'file_id': file_id,
+            'width': anim.width,
+            'height': anim.height,
+            'file_size': anim.file_size or 'N/A'
+        },
+        update=message
+    )
+
+
+@misc_router.message(F.sticker)
+async def extract_sticker_file_id(message: Message, user: User, session: Session, message_manager: MessageManager):
+    """Extract file_id from sticker sent by admin."""
+    if not is_admin(message.from_user.id):
+        return
+
+    sticker = message.sticker
+    file_id = sticker.file_id
+
+    await message_manager.send_template(
+        user=user,
+        template_key='admin/object/extracted',
+        variables={
+            'media_type': 'sticker',
+            'file_id': file_id,
+            'emoji': sticker.emoji or 'N/A',
+            'set_name': sticker.set_name or 'N/A',
+            'file_size': sticker.file_size or 'N/A'
+        },
+        update=message
+    )
 
 
 # =============================================================================
