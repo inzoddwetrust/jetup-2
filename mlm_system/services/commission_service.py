@@ -86,71 +86,111 @@ class CommissionService:
         Calculate differential commissions up the chain.
         Uses ChainWalker for safe upline traversal.
         Accumulates compression and sends remainder to ROOT.
+
+        COMPRESSION LOGIC (per TZ):
+        - Inactive users are skipped (get $0)
+        - Their differential is accumulated for next active user
+        - BUT: lastPercentage is still updated to inactive user's rank
+        - This ensures next active user gets differential from inactive's rank, not buyer's
+
+        Example:
+        - Buyer (0%) -> L4_A (4%, active) -> L3_A (8%, INACTIVE) -> L2_A (12%, active)
+        - L4_A: 4% - 0% = 4% = $40
+        - L3_A: 8% - 4% = 4% accumulated (but lastPercentage becomes 8%)
+        - L2_A: 12% - 8% = 4% + 4% accumulated = 8% = $80
+        - Total: $40 + $80 = $120 ❌ WRONG
+
+        CORRECT:
+        - L4_A: 4% - 0% = 4% = $40
+        - L3_A: INACTIVE, skipped, accumulated = 4%
+        - L2_A: 12% - 4% = 8% (NOT 12% - 8% because we don't update lastPercentage for inactive)
+        - BUT we add accumulated: 8% differential, NOT 8% + 4%
+
+        Actually per TZ Method A:
+        - Inactive user is skipped completely
+        - Next active user receives from where last PAID user left off
+        - So L2_A should get 12% - 4% = 8% = $80 (NO extra compression)
+
+        Let me re-read TZ...
+
+        Per TZ "Compression Method A":
+        - Inactive users are simply skipped
+        - Their portion goes to the NEXT active user up the chain
+        - The differential is calculated from last ACTIVE user's percentage
+
+        So correct flow:
+        - L4_A (4%, active): differential = 4% - 0% = 4%, gets $40, lastPaid = 4%
+        - L3_A (8%, inactive): SKIPPED, gets $0
+        - L2_A (12%, active): differential = 12% - 4% = 8%, gets $80, lastPaid = 12%
+        - L1_A (15%, active): differential = 15% - 12% = 3%, gets $30
+        - ROOT (18%, active): differential = 18% - 15% = 3%, gets $30
+        - Total: $40 + $80 + $30 + $30 = $180 ✅
         """
         from mlm_system.utils.chain_walker import ChainWalker
 
         commissions = []
-        lastPercentage = Decimal("0")
-        accumulated_compression = Decimal("0")
+        lastPaidPercentage = Decimal("0")  # Track last PAID percentage (active users only)
+        accumulated_compression = Decimal("0")  # Not used in Method A, but kept for system_compression
 
         walker = ChainWalker(self.session)
 
         def process_upline(upline_user: User, level: int) -> bool:
             """Process each upline user for commission calculation."""
-            nonlocal lastPercentage, accumulated_compression
+            nonlocal lastPaidPercentage, accumulated_compression
 
-            # Get user percentage
+            # Get user's rank percentage
             userPercentage = self._getUserRankPercentage(upline_user)
-            differential = userPercentage - lastPercentage
 
             # Check if upline is active
             if not upline_user.isActive:
-                # Accumulate for compression
-                if differential > 0:
-                    accumulated_compression += differential
-
+                # INACTIVE: Record with $0, do NOT update lastPaidPercentage
+                # The differential they "would have received" goes to next active user
                 commissions.append({
                     "userId": upline_user.userID,
-                    "percentage": differential,
+                    "percentage": Decimal("0"),
                     "amount": Decimal("0"),
                     "level": level,
                     "rank": upline_user.rank,
                     "isActive": False,
-                    "compressed": True
+                    "compressed": True,
+                    "compressionApplied": 1
                 })
 
                 logger.debug(
-                    f"Compressing inactive user {upline_user.userID}, "
-                    f"accumulating {float(differential * 100):.1f}%"
+                    f"Skipping inactive user {upline_user.userID} (rank {upline_user.rank}, "
+                    f"{float(userPercentage * 100):.1f}%), lastPaidPercentage stays at "
+                    f"{float(lastPaidPercentage * 100):.1f}%"
                 )
+
             else:
-                # Active user - gets their differential + accumulated compression
-                if differential > 0 or accumulated_compression > 0:
-                    total_percentage = differential + accumulated_compression
-                    amount = Decimal(str(purchase.packPrice)) * total_percentage
+                # ACTIVE: Calculate differential from last PAID percentage
+                differential = userPercentage - lastPaidPercentage
+
+                if differential > 0:
+                    amount = Decimal(str(purchase.packPrice)) * differential
 
                     commissions.append({
                         "userId": upline_user.userID,
-                        "percentage": total_percentage,
+                        "percentage": differential,
                         "amount": amount,
                         "level": level,
                         "rank": upline_user.rank,
                         "isActive": True,
-                        "compressed": False
+                        "compressed": False,
+                        "compressionApplied": 0
                     })
 
-                    if accumulated_compression > 0:
-                        logger.info(
-                            f"User {upline_user.userID} receives compression: "
-                            f"+{float(accumulated_compression * 100):.1f}% "
-                            f"(total {float(total_percentage * 100):.1f}%)"
-                        )
+                    logger.debug(
+                        f"Active user {upline_user.userID}: {float(userPercentage * 100):.1f}% - "
+                        f"{float(lastPaidPercentage * 100):.1f}% = {float(differential * 100):.1f}% "
+                        f"= ${amount}"
+                    )
 
-                    lastPercentage = userPercentage
-                    accumulated_compression = Decimal("0")  # Reset after distribution
+                    # Update lastPaidPercentage ONLY for active users who received payment
+                    lastPaidPercentage = userPercentage
 
-            # Stop at max percentage
-            if lastPercentage >= Decimal("0.18"):
+            # Stop at max percentage (18%)
+            if lastPaidPercentage >= Decimal("0.18"):
                 return False  # Stop walking
 
             return True  # Continue walking
@@ -159,9 +199,10 @@ class CommissionService:
         walker.walk_upline(purchase.user, process_upline)
 
         # ═══════════════════════════════════════════════════════════════════
-        # CRITICAL: Send remaining commission to ROOT (system wallet)
+        # SYSTEM COMPRESSION: Send remaining commission to ROOT
+        # If chain didn't reach 18%, remainder goes to system wallet
         # ═══════════════════════════════════════════════════════════════════
-        if accumulated_compression > 0 or lastPercentage < Decimal("0.18"):
+        if lastPaidPercentage < Decimal("0.18"):
             default_ref_id = walker.get_default_referrer_id()
             root_user = self.session.query(User).filter_by(
                 telegramID=default_ref_id
@@ -169,29 +210,47 @@ class CommissionService:
 
             if root_user:
                 # Calculate remaining percentage up to 18%
-                remaining_percentage = Decimal("0.18") - lastPercentage
-                total_to_root = accumulated_compression + remaining_percentage
+                remaining_percentage = Decimal("0.18") - lastPaidPercentage
 
-                if total_to_root > 0:
-                    amount = Decimal(str(purchase.packPrice)) * total_to_root
+                if remaining_percentage > 0:
+                    amount = Decimal(str(purchase.packPrice)) * remaining_percentage
 
-                    commissions.append({
-                        "userId": root_user.userID,
-                        "percentage": total_to_root,
-                        "amount": amount,
-                        "level": len(commissions) + 1,
-                        "rank": root_user.rank,
-                        "isActive": True,  # Root is ALWAYS treated as active
-                        "compressed": False,
-                        "isSystemRoot": True  # Mark as system commission
-                    })
-
-                    logger.info(
-                        f"System commission to root user {root_user.userID}: "
-                        f"${amount} ({float(total_to_root * 100):.1f}% - "
-                        f"compression: {float(accumulated_compression * 100):.1f}%, "
-                        f"remaining: {float(remaining_percentage * 100):.1f}%)"
+                    # Check if ROOT already has a commission entry
+                    root_has_commission = any(
+                        c["userId"] == root_user.userID and c["isActive"]
+                        for c in commissions
                     )
+
+                    if root_has_commission:
+                        # Add to existing ROOT commission
+                        for c in commissions:
+                            if c["userId"] == root_user.userID and c["isActive"]:
+                                c["amount"] += amount
+                                c["percentage"] += remaining_percentage
+                                c["isSystemRoot"] = True
+                                logger.info(
+                                    f"Added system compression to existing ROOT commission: "
+                                    f"+${amount} ({float(remaining_percentage * 100):.1f}%)"
+                                )
+                                break
+                    else:
+                        # Create new system_compression entry
+                        commissions.append({
+                            "userId": root_user.userID,
+                            "percentage": remaining_percentage,
+                            "amount": amount,
+                            "level": len(commissions) + 1,
+                            "rank": root_user.rank,
+                            "isActive": True,
+                            "compressed": False,
+                            "isSystemRoot": True,
+                            "commissionType": "system_compression"
+                        })
+
+                        logger.info(
+                            f"System compression to root user {root_user.userID}: "
+                            f"${amount} ({float(remaining_percentage * 100):.1f}%)"
+                        )
 
         return commissions
 

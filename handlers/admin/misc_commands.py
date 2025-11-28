@@ -661,8 +661,19 @@ async def cmd_fallback(message: Message, user: User, session: Session, message_m
 
     command = message.text.split()[0]
     logger.info(f"Admin {message.from_user.id} unknown command: {command}")
-    await message_manager.send_template(user=user, template_key='admin/commands/unknown',
-                                        variables={'command': command}, update=message)
+
+    if user:
+        await message_manager.send_template(
+            user=user,
+            template_key='admin/commands/unknown',
+            variables={'command': command},
+            update=message
+        )
+    else:
+        await message.reply(
+            f"❓ Unknown: <code>{command}</code>\nUse <code>&help</code>",
+            parse_mode="HTML"
+        )
 
 
 __all__ = ['misc_router']

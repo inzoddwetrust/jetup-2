@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timezone
 from sqlalchemy import and_
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, List
 
 from models import Notification, NotificationDelivery, User
 from core.db import get_db_session_ctx
@@ -180,7 +180,7 @@ class NotificationProcessor:
                 await self._bot.session.close()
                 self._bot = None
 
-    async def process_filter(self, filter_json: str) -> list[int]:
+    async def process_filter(self, filter_json: str) -> List[int]:
         """
         Process JSON filter conditions to get list of user IDs.
 
@@ -232,25 +232,27 @@ class NotificationProcessor:
                 ]
                 session.bulk_save_objects(deliveries)
 
-    async def send_notification(self, delivery: NotificationDelivery) -> bool:
+    async def _send_delivery(self, delivery_id: int) -> bool:
         """
-        Send a single notification to user.
+        Send a single notification by delivery ID.
+
+        All operations happen in a single session to avoid detached object errors.
 
         Args:
-            delivery: NotificationDelivery object
+            delivery_id: ID of the NotificationDelivery
 
         Returns:
             True if sent successfully, False otherwise
         """
         try:
             with get_db_session_ctx() as session:
-                # Get delivery in THIS session (not merge from another session!)
+                # Get delivery in this session
                 delivery = session.query(NotificationDelivery).filter_by(
-                    deliveryID=delivery.deliveryID
+                    deliveryID=delivery_id
                 ).first()
 
                 if not delivery:
-                    logger.error(f"Delivery not found: {delivery.deliveryID}")
+                    logger.error(f"Delivery not found: {delivery_id}")
                     return False
 
                 # Get user
@@ -260,14 +262,25 @@ class NotificationProcessor:
                     logger.warning(f"User {delivery.userID} not found or has no telegram ID")
                     delivery.status = "error"
                     delivery.errorMessage = "User not found or no telegram ID"
+                    delivery.attempts += 1
+                    session.commit()
                     return False
 
                 # Get notification (via relationship)
                 notification = delivery.notification
 
+                if not notification:
+                    logger.error(f"Notification not found for delivery {delivery_id}")
+                    delivery.status = "error"
+                    delivery.errorMessage = "Notification not found"
+                    delivery.attempts += 1
+                    session.commit()
+                    return False
+
                 # Check expiry
                 if notification.expiryAt and notification.expiryAt < datetime.now(timezone.utc):
                     delivery.status = "expired"
+                    session.commit()
                     logger.info(f"Notification {notification.notificationID} expired")
                     return False
 
@@ -280,50 +293,68 @@ class NotificationProcessor:
                     }
                     keyboard = NotificationProcessor._create_keyboard(notification.buttons, variables)
 
-                # Send message via bot
-                async with self.get_bot() as bot:
-                    message = await bot.send_message(
-                        chat_id=user.telegramID,
-                        text=notification.text,
-                        parse_mode=notification.parseMode,
-                        reply_markup=keyboard,
-                        disable_web_page_preview=notification.disablePreview,
-                        disable_notification=notification.silent
-                    )
+                # Try to send message via bot
+                try:
+                    async with self.get_bot() as bot:
+                        message = await bot.send_message(
+                            chat_id=user.telegramID,
+                            text=notification.text,
+                            parse_mode=notification.parseMode,
+                            reply_markup=keyboard,
+                            disable_web_page_preview=notification.disablePreview,
+                            disable_notification=notification.silent
+                        )
 
-                    # Schedule auto-deletion if needed
-                    if notification.autoDelete:
-                        asyncio.create_task(self._schedule_deletion(
-                            user.telegramID,
-                            message.message_id,
-                            notification.autoDelete
-                        ))
+                        # Schedule auto-deletion if needed
+                        if notification.autoDelete:
+                            asyncio.create_task(self._schedule_deletion(
+                                user.telegramID,
+                                message.message_id,
+                                notification.autoDelete
+                            ))
 
-                # Update delivery status
-                delivery.status = "sent"
-                delivery.sentAt = datetime.now(timezone.utc)
+                    # Success - update delivery status
+                    delivery.status = "sent"
+                    delivery.sentAt = datetime.now(timezone.utc)
+                    delivery.attempts += 1
 
-                # Update user last active
-                user.lastActive = datetime.now(timezone.utc)
+                    # Update user last active
+                    user.lastActive = datetime.now(timezone.utc)
 
-                logger.info(f"Notification {notification.notificationID} sent to user {user.userID}")
-                return True
+                    session.commit()
+                    logger.info(f"Notification {notification.notificationID} sent to user {user.userID}")
+                    return True
+
+                except Exception as send_error:
+                    # Send failed - update error info
+                    delivery.attempts += 1
+                    delivery.errorMessage = str(send_error)[:500]
+
+                    if delivery.attempts >= 3:
+                        delivery.status = "error"
+
+                    session.commit()
+                    logger.warning(f"Failed to send notification to user {user.userID}: {send_error}")
+                    return False
 
         except Exception as e:
-            logger.error(f"Error sending notification to delivery {delivery.deliveryID}: {e}", exc_info=True)
-
-            # Try to update error status
-            try:
-                with get_db_session_ctx() as session:
-                    delivery = session.query(NotificationDelivery).filter_by(
-                        deliveryID=delivery.deliveryID
-                    ).first()
-                    if delivery:
-                        delivery.errorMessage = str(e)[:500]  # Limit error message length
-            except:
-                pass
-
+            logger.error(f"Error processing delivery {delivery_id}: {e}", exc_info=True)
             return False
+
+    async def send_notification(self, delivery: NotificationDelivery) -> bool:
+        """
+        Send a single notification to user.
+
+        DEPRECATED: This method is kept for backward compatibility.
+        Use _send_delivery(delivery_id) internally.
+
+        Args:
+            delivery: NotificationDelivery object
+
+        Returns:
+            True if sent successfully, False otherwise
+        """
+        return await self._send_delivery(delivery.deliveryID)
 
     async def _schedule_deletion(self, chat_id: int, message_id: int, delay: int):
         """
@@ -345,11 +376,16 @@ class NotificationProcessor:
         """
         Process pending notification deliveries.
         Sends notifications and updates delivery status.
+
+        FIXED: Collects delivery IDs first, then processes each in its own session
+        to avoid detached object errors.
         """
+        # Step 1: Collect delivery IDs to process
+        delivery_ids = []
+
         with get_db_session_ctx() as session:
-            # Get pending deliveries (up to 3 attempts)
             pending_deliveries = (
-                session.query(NotificationDelivery)
+                session.query(NotificationDelivery.deliveryID)
                 .join(Notification)
                 .filter(and_(
                     NotificationDelivery.status == "pending",
@@ -360,15 +396,11 @@ class NotificationProcessor:
                 .all()
             )
 
-            for delivery in pending_deliveries:
-                success = await self.send_notification(delivery)
+            delivery_ids = [d.deliveryID for d in pending_deliveries]
 
-                delivery.attempts += 1
-                if success:
-                    delivery.status = "sent"
-                    delivery.sentAt = datetime.now(timezone.utc)
-                elif delivery.attempts >= 3:
-                    delivery.status = "error"
+        # Step 2: Process each delivery in its own session
+        for delivery_id in delivery_ids:
+            await self._send_delivery(delivery_id)
 
     async def process_new_notifications(self) -> None:
         """
