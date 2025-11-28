@@ -1,4 +1,3 @@
-# test_mlm_system.py
 """
 Comprehensive MLM System Test Suite.
 Tests all MLM functionality against TZ specifications.
@@ -27,10 +26,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sqlalchemy.orm.attributes import flag_modified
 
 from config import Config
-from core.db import get_engine, get_session, setup_database, drop_all_tables
+from core.db import get_session, setup_database, drop_all_tables
 from models import (
     User, Purchase, Bonus, ActiveBalance, PassiveBalance,
-    Project, Option, GlobalPool, MonthlyStats
+    Option, GlobalPool
 )
 from mlm_system.services.commission_service import CommissionService
 from mlm_system.services.volume_service import VolumeService
