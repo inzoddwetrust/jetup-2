@@ -357,6 +357,17 @@ async def cmd_time(
             dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             timeMachine.setTime(dt, adminId=message.from_user.id)
             logger.warning(f"Time Machine set to {dt} by admin {message.from_user.id}")
+
+            # Immediately trigger scheduled tasks check for new time
+            try:
+                from core.system_services import ServiceManager
+                service_manager = get_service(ServiceManager)
+                if service_manager and hasattr(service_manager, 'mlm_scheduler') and service_manager.mlm_scheduler:
+                    await service_manager.mlm_scheduler.checkScheduledTasks()
+                    logger.info("Triggered checkScheduledTasks after Time Machine change")
+            except Exception as e:
+                logger.error(f"Failed to trigger scheduled tasks: {e}")
+
             await message_manager.send_template(
                 user=user,
                 template_key='admin/time/set',
@@ -368,7 +379,6 @@ async def cmd_time(
 
     except ImportError:
         await message_manager.send_template(user=user, template_key='admin/time/error', update=message)
-
 
 # =============================================================================
 # &testmail - Test Email (FULL TALENTIR PATTERN)
@@ -706,8 +716,19 @@ async def cmd_fallback(message: Message, user: User, session: Session, message_m
 
     command = message.text.split()[0]
     logger.info(f"Admin {message.from_user.id} unknown command: {command}")
-    await message_manager.send_template(user=user, template_key='admin/commands/unknown',
-                                        variables={'command': command}, update=message)
+
+    if user:
+        await message_manager.send_template(
+            user=user,
+            template_key='admin/commands/unknown',
+            variables={'command': command},
+            update=message
+        )
+    else:
+        await message.reply(
+            f"❓ Unknown: <code>{command}</code>\nUse <code>&help</code>",
+            parse_mode="HTML"
+        )
 
 
 __all__ = ['misc_router']

@@ -5,8 +5,8 @@ Rank management service for MLM system.
 from decimal import Decimal
 from typing import Optional, Dict
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy import func, extract
 import logging
 
 from models.user import User
@@ -382,12 +382,14 @@ class RankService:
         else:
             qualifying_tv = user.teamVolumeTotal or Decimal("0")
 
-        # Get commission sum for the month
+        # Get commission sum for the month (PostgreSQL compatible)
+        year, month = currentMonth.split('-')
         commissionsEarned = self.session.query(
             func.sum(Bonus.bonusAmount)
         ).filter(
             Bonus.userID == userId,
-            func.strftime('%Y-%m', Bonus.createdAt) == currentMonth
+            extract('year', Bonus.createdAt) == int(year),
+            extract('month', Bonus.createdAt) == int(month)
         ).scalar() or Decimal("0")
 
         # Create stats record

@@ -118,7 +118,7 @@ class VolumeService:
         # Get requirements for target rank
         try:
             rankEnum = Rank(targetRank)
-            rank_requirements = RANK_CONFIG.get(rankEnum, {})
+            rank_requirements = RANK_CONFIG().get(rankEnum, {})
         except ValueError:
             rank_requirements = {}
 

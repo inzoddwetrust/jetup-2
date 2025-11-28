@@ -80,6 +80,7 @@ from .import_commands import import_router
 from .payment_commands import payment_router
 from .balance_commands import balance_router
 from .legacy_commands import legacy_router
+from .mlm_commands import mlm_router
 from .misc_commands import misc_router
 
 # Include sub-routers (ORDER MATTERS - misc_router LAST for fallback)
@@ -88,6 +89,7 @@ admin_router.include_router(import_router)
 admin_router.include_router(payment_router)
 admin_router.include_router(balance_router)
 admin_router.include_router(legacy_router)
+admin_router.include_router(mlm_router)
 admin_router.include_router(misc_router)  # LAST - has fallback handler
 
 
