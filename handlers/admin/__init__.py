@@ -78,7 +78,7 @@ admin_router = Router(name="admin")
 from .config_commands import config_router
 from .import_commands import import_router
 from .payment_commands import payment_router
-#from .balance_commands import balance_router
+from .balance_commands import balance_router
 from .legacy_commands import legacy_router
 from .misc_commands import misc_router
 
@@ -86,7 +86,7 @@ from .misc_commands import misc_router
 admin_router.include_router(config_router)
 admin_router.include_router(import_router)
 admin_router.include_router(payment_router)
-#admin_router.include_router(balance_router)
+admin_router.include_router(balance_router)
 admin_router.include_router(legacy_router)
 admin_router.include_router(misc_router)  # LAST - has fallback handler
 

@@ -4,6 +4,12 @@ Legacy user migration command.
 
 Commands:
     &legacy - Run legacy user migration from Google Sheets
+
+Templates used:
+    admin/legacy/loading
+    admin/legacy/report
+    admin/legacy/in_progress
+    admin/legacy/error
 """
 import logging
 
@@ -13,10 +19,18 @@ from sqlalchemy.orm import Session
 
 from core.message_manager import MessageManager
 from models.user import User
+from background.legacy_processor import legacy_processor
 
 logger = logging.getLogger(__name__)
 
 legacy_router = Router(name="admin_legacy")
+
+
+def is_admin(user_id: int) -> bool:
+    """Check if user is admin."""
+    from config import Config
+    admins = Config.get(Config.ADMIN_USER_IDS) or []
+    return user_id in admins
 
 
 @legacy_router.message(F.text == '&legacy')
@@ -26,50 +40,77 @@ async def cmd_legacy(
         session: Session,
         message_manager: MessageManager
 ):
-    """Run legacy user migration manually."""
-    from background.legacy_processor import legacy_processor
+    """
+    Run legacy user migration manually.
+
+    This command triggers the legacy processor to:
+    1. Read users from LEGACY_SHEET_ID Google Sheet
+    2. Match them with existing users by email
+    3. Assign uplines and create purchases
+    4. Mark records as processed
+    """
+    if not is_admin(message.from_user.id):
+        return
 
     logger.info(f"Admin {message.from_user.id} triggered &legacy")
 
-    reply = await message.reply("🔄 Запускаю legacy миграцию...")
+    # Show loading
+    status_msg = await message_manager.send_template(
+        user=user,
+        template_key='admin/legacy/loading',
+        update=message
+    )
 
     try:
-        stats = await legacy_processor._process_legacy_users()
-
-        report = (
-            f"📊 Legacy Migration Report:\n\n"
-            f"📋 Total records: {stats.total_records}\n"
-            f"👤 Users found: {stats.users_found}\n"
-            f"👥 Upliners assigned: {stats.upliners_assigned}\n"
-            f"📈 Purchases created: {stats.purchases_created}\n"
-            f"✅ Completed: {stats.completed}\n"
-            f"❌ Errors: {stats.errors}\n"
-        )
-
-        if stats.users_found == 0 and stats.upliners_assigned == 0 and stats.purchases_created == 0:
-            report += "\n🔍 No new legacy users found to process."
+        # Run migration
+        if hasattr(legacy_processor, 'run_once'):
+            stats = await legacy_processor.run_once()
         else:
-            report += "\n🎯 Legacy migration processing completed!"
+            stats = await legacy_processor._process_legacy_users()
 
-        if stats.errors > 0 and stats.error_details:
-            report += "\n\n⚠️ Error details (first 10):\n"
-            for email, error in stats.error_details[:10]:
-                report += f"• {email}: {error}\n"
+        # Determine status message
+        if stats.users_found == 0 and stats.upliners_assigned == 0 and stats.purchases_created == 0:
+            status_message = "🔍 No new legacy users found to process."
+        else:
+            status_message = "🎯 Legacy migration processing completed!"
 
-        await reply.edit_text(report)
+        # Show report
+        await message_manager.send_template(
+            user=user,
+            template_key='admin/legacy/report',
+            variables={
+                'total_records': stats.total_records,
+                'users_found': stats.users_found,
+                'upliners_assigned': stats.upliners_assigned,
+                'purchases_created': stats.purchases_created,
+                'completed': stats.completed,
+                'errors': stats.errors,
+                'status_message': status_message
+            },
+            update=status_msg,
+            edit=True
+        )
 
     except RuntimeError as e:
         if "already in progress" in str(e):
-            await reply.edit_text(
-                "⚠️ Миграция уже запущена.\n"
-                "Автоматический запуск каждые 10 минут."
+            await message_manager.send_template(
+                user=user,
+                template_key='admin/legacy/in_progress',
+                update=status_msg,
+                edit=True
             )
         else:
             raise
 
     except Exception as e:
         logger.error(f"Error in &legacy: {e}", exc_info=True)
-        await reply.edit_text(f"❌ Ошибка: {str(e)}")
+        await message_manager.send_template(
+            user=user,
+            template_key='admin/legacy/error',
+            variables={'error': str(e)},
+            update=status_msg,
+            edit=True
+        )
 
 
 __all__ = ['legacy_router']
