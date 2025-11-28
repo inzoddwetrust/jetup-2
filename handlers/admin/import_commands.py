@@ -26,7 +26,7 @@ import shutil
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from aiogram import Router, F
 from aiogram.types import Message
@@ -58,6 +58,16 @@ BACKUP_DIRS = {
 # =============================================================================
 
 import_router = Router(name="admin_import")
+
+
+# =============================================================================
+# ADMIN CHECK
+# =============================================================================
+
+def is_admin(user_id: int) -> bool:
+    """Check if user is admin."""
+    admins = Config.get(Config.ADMIN_USER_IDS) or []
+    return user_id in admins
 
 
 # =============================================================================
@@ -103,7 +113,7 @@ async def create_backup(category: str = 'import') -> str:
     return backup_path
 
 
-def get_available_backups(category: str = 'import', limit: int = 10) -> list:
+def get_available_backups(category: str = 'import', limit: int = 10) -> List[str]:
     """Get list of available backup files."""
     backup_dir = BACKUP_DIRS.get(category, BACKUP_DIRS['import'])
 
@@ -135,8 +145,17 @@ async def cmd_import(
         &import                    - dry run, all tables
         &import Users              - dry run, Users only
         &import Payments safe      - safe mode, Payments only
-        &import --all force        - force mode, all tables
+        &import --all force        - force mode, all tables (requires confirmation)
+
+    Modes:
+        dry   - Check only, no changes
+        safe  - Import with validation, skip critical fields
+        force - Full import (dangerous!)
     """
+    # Admin check
+    if not is_admin(message.from_user.id):
+        return
+
     logger.info(f"Admin {message.from_user.id} triggered &import")
 
     # Parse command arguments
@@ -257,7 +276,7 @@ async def cmd_import(
         finally:
             import_session.close()
 
-        # Send report
+        # Build report
         if total_stats['errors'] == 0:
             icon = '✅'
         else:
@@ -332,6 +351,10 @@ async def cmd_restore(
         &restore              - Show available backups
         &restore <filename>   - Restore from specific backup
     """
+    # Admin check
+    if not is_admin(message.from_user.id):
+        return
+
     logger.info(f"Admin {message.from_user.id} triggered &restore")
 
     args = message.text.split()[1:] if len(message.text.split()) > 1 else []
@@ -344,6 +367,9 @@ async def cmd_restore(
             backups = get_available_backups(category, limit=5)
             if backups:
                 all_backups.extend(backups)
+
+        # Remove duplicates and sort
+        all_backups = sorted(set(all_backups), reverse=True)
 
         await message_manager.send_template(
             user=user,

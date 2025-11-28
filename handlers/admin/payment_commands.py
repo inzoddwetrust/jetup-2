@@ -7,15 +7,26 @@ Callbacks:
     final_approve_{id}    - Second step: execute transaction
     reject_payment_{id}   - Reject payment
     cancel_approval       - Cancel approval flow
+
+Commands:
+    &check / &checkpayments - Check pending payments
+
+Templates used:
+    admin_payment_confirm_action
+    admin_payment_approved
+    admin_payment_rejected
+    admin_payment_wrong_status
+    user_payment_approved
+    user_payment_rejected
 """
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from aiogram import Router, F
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Message
+from sqlalchemy import func
 from sqlalchemy.orm import Session
-from aiogram.types import Message
 
 from core.message_manager import MessageManager
 from core.templates import MessageTemplates
@@ -26,15 +37,22 @@ from models.notification import Notification
 
 logger = logging.getLogger(__name__)
 
-# =============================================================================
-# ROUTER SETUP
-# =============================================================================
-
 payment_router = Router(name="admin_payment")
 
 
 # =============================================================================
-# HELPER FUNCTIONS
+# ADMIN CHECK
+# =============================================================================
+
+def is_admin(user_id: int) -> bool:
+    """Check if user is admin."""
+    from config import Config
+    admins = Config.get(Config.ADMIN_USER_IDS) or []
+    return user_id in admins
+
+
+# =============================================================================
+# HELPER: Create User Notification
 # =============================================================================
 
 async def create_user_payment_notification(
@@ -43,25 +61,14 @@ async def create_user_payment_notification(
         is_approved: bool,
         session: Session
 ) -> Notification:
-    """
-    Create notification for user about payment approval/rejection.
-
-    Args:
-        payment: Payment object
-        payer: User who made the payment
-        is_approved: True if approved, False if rejected
-        session: Database session
-
-    Returns:
-        Notification object (already added to session)
-    """
+    """Create notification for user about payment approval/rejection."""
     template_key = 'user_payment_approved' if is_approved else 'user_payment_rejected'
 
     text, buttons = await MessageTemplates.get_raw_template(
         template_key,
         {
             'payment_id': payment.paymentID,
-            'payment_date': payment.createdAt.strftime('%Y-%m-%d %H:%M:%S'),
+            'payment_date': payment.createdAt.strftime('%Y-%m-%d %H:%M:%S') if payment.createdAt else '',
             'amount': payment.amount,
             'balance': payer.balanceActive,
             'txid': payment.txid
@@ -86,7 +93,7 @@ async def create_user_payment_notification(
 
 
 # =============================================================================
-# CALLBACK HANDLERS
+# CALLBACK: Initial Approval
 # =============================================================================
 
 @payment_router.callback_query(F.data.startswith('approve_payment_'))
@@ -96,73 +103,45 @@ async def handle_initial_approval(
         session: Session,
         message_manager: MessageManager
 ):
-    """
-    First step of payment approval - show confirmation dialog.
+    """First step of payment approval - show confirmation dialog."""
+    if not is_admin(callback_query.from_user.id):
+        return
 
-    Flow:
-        1. Extract payment_id from callback data
-        2. Verify payment exists and status == "check"
-        3. Show confirmation message with final_approve button
-
-    Callback data format: approve_payment_{payment_id}
-    """
-    # Extract payment ID
     try:
         payment_id = int(callback_query.data.split('_')[-1])
     except (ValueError, IndexError):
         logger.error(f"Invalid callback data: {callback_query.data}")
-        await callback_query.answer("Invalid payment ID", show_alert=True)
         return
 
     logger.info(f"Admin {user.userID} initiating approval for payment {payment_id}")
 
-    # Get payment
     payment = session.query(Payment).filter_by(paymentID=payment_id).first()
 
     if not payment:
-        await callback_query.answer("Payment not found", show_alert=True)
         return
 
-    # Check payment status
     if payment.status != "check":
-        # Payment already processed
-        text, media_id, keyboard, parse_mode, disable_preview, _, _ = await MessageTemplates.generate_screen(
-            user,
-            'admin_payment_wrong_status',
-            {
-                'payment_id': payment_id,
-                'status': payment.status
-            }
+        await message_manager.send_template(
+            user=user,
+            template_key='admin_payment_wrong_status',
+            variables={'payment_id': payment_id, 'status': payment.status},
+            update=callback_query,
+            edit=True
         )
-
-        await callback_query.message.edit_text(
-            text=text,
-            parse_mode=parse_mode,
-            reply_markup=keyboard,
-            disable_web_page_preview=disable_preview
-        )
-        await callback_query.answer("Payment already processed", show_alert=True)
         return
 
-    # Show confirmation dialog
-    text, media_id, keyboard, parse_mode, disable_preview, _, _ = await MessageTemplates.generate_screen(
-        user,
-        'admin_payment_confirm_action',
-        {
-            'payment_id': payment_id,
-            'action': 'approve'
-        }
+    await message_manager.send_template(
+        user=user,
+        template_key='admin_payment_confirm_action',
+        variables={'payment_id': payment_id, 'action': 'approve'},
+        update=callback_query,
+        edit=True
     )
 
-    await callback_query.message.edit_text(
-        text=text,
-        parse_mode=parse_mode,
-        reply_markup=keyboard,
-        disable_web_page_preview=disable_preview
-    )
 
-    await callback_query.answer()
-
+# =============================================================================
+# CALLBACK: Final Approval
+# =============================================================================
 
 @payment_router.callback_query(F.data.startswith('final_approve_'))
 async def handle_final_approval(
@@ -171,80 +150,43 @@ async def handle_final_approval(
         session: Session,
         message_manager: MessageManager
 ):
-    """
-    Final payment approval - execute transaction.
+    """Final payment approval - execute transaction."""
+    if not is_admin(callback_query.from_user.id):
+        return
 
-    Transaction:
-        1. Create ActiveBalance record (+amount, status='done')
-        2. Update user.balanceActive += amount
-        3. Update payment.status = 'paid'
-        4. Set payment.confirmedBy and confirmationTime
-        5. Create notification for user
-        6. Commit transaction
-
-    Callback data format: final_approve_{payment_id}
-    """
-    # Extract payment ID
     try:
         payment_id = int(callback_query.data.split('_')[-1])
     except (ValueError, IndexError):
         logger.error(f"Invalid callback data: {callback_query.data}")
-        await callback_query.answer("Invalid payment ID", show_alert=True)
         return
 
     logger.info(f"Admin {user.userID} executing final approval for payment {payment_id}")
 
     try:
-        # Start nested transaction (savepoint)
         session.begin_nested()
 
-        # Get payment with row lock
-        payment = session.query(Payment).filter_by(
-            paymentID=payment_id
-        ).with_for_update().first()
-
+        payment = session.query(Payment).filter_by(paymentID=payment_id).with_for_update().first()
         if not payment:
-            await callback_query.answer("Payment not found", show_alert=True)
             return
 
-        # Verify status hasn't changed
         if payment.status != "check":
             session.rollback()
-
-            text, media_id, keyboard, parse_mode, disable_preview, _, _ = await MessageTemplates.generate_screen(
-                user,
-                'admin_payment_wrong_status',
-                {
-                    'payment_id': payment_id,
-                    'status': payment.status
-                }
+            await message_manager.send_template(
+                user=user,
+                template_key='admin_payment_wrong_status',
+                variables={'payment_id': payment_id, 'status': payment.status},
+                update=callback_query,
+                edit=True
             )
-
-            await callback_query.message.edit_text(
-                text=text,
-                parse_mode=parse_mode,
-                reply_markup=keyboard,
-                disable_web_page_preview=disable_preview
-            )
-            await callback_query.answer("Payment already processed", show_alert=True)
             return
 
-        # Get payer with row lock
-        payer = session.query(User).filter_by(
-            userID=payment.userID
-        ).with_for_update().first()
-
+        payer = session.query(User).filter_by(userID=payment.userID).with_for_update().first()
         if not payer:
             session.rollback()
             logger.error(f"User not found for payment {payment_id}")
-            await callback_query.answer("User not found", show_alert=True)
             return
 
-        # =====================================================================
-        # TRANSACTION: Approve payment
-        # =====================================================================
-
-        # 1. Create ActiveBalance record
+        # Transaction
         active_balance_record = ActiveBalance(
             userID=payer.userID,
             firstname=payer.firstname,
@@ -253,62 +195,45 @@ async def handle_final_approval(
             status='done',
             reason=f'payment={payment_id}',
             link='',
-            notes=f'Payment approved by admin {user.userID} ({user.firstname})'
+            notes=f'Payment approved by admin {user.userID} ({user.firstname})',
+            ownerTelegramID=payer.telegramID,
+            ownerEmail=payer.email or ''
         )
         session.add(active_balance_record)
 
-        # 2. Update user balance
         payer.balanceActive = (payer.balanceActive or Decimal("0")) + Decimal(str(payment.amount))
-
-        # 3. Update payment status
         payment.status = "paid"
         payment.confirmedBy = str(callback_query.from_user.id)
         payment.confirmationTime = datetime.now(timezone.utc)
 
-        # 4. Create notification for user
-        await create_user_payment_notification(
-            payment, payer, is_approved=True, session=session
-        )
+        await create_user_payment_notification(payment, payer, is_approved=True, session=session)
 
-        # 5. Commit transaction
         session.commit()
 
-        logger.info(
-            f"Payment {payment_id} approved: "
-            f"user={payer.userID}, amount={payment.amount}, "
-            f"new_balance={payer.balanceActive}"
-        )
+        logger.info(f"Payment {payment_id} approved: user={payer.userID}, amount={payment.amount}")
 
-        # =====================================================================
-        # Update admin message
-        # =====================================================================
-
-        text, media_id, keyboard, parse_mode, disable_preview, _, _ = await MessageTemplates.generate_screen(
-            user,
-            'admin_payment_approved',
-            {
+        await message_manager.send_template(
+            user=user,
+            template_key='admin_payment_approved',
+            variables={
                 'payment_id': payment_id,
                 'user_name': payer.firstname,
                 'user_id': payer.userID,
                 'amount': payment.amount,
                 'new_balance': payer.balanceActive
-            }
+            },
+            update=callback_query,
+            edit=True
         )
-
-        await callback_query.message.edit_text(
-            text=text,
-            parse_mode=parse_mode,
-            reply_markup=keyboard,
-            disable_web_page_preview=disable_preview
-        )
-
-        await callback_query.answer("✅ Payment approved", show_alert=False)
 
     except Exception as e:
         session.rollback()
         logger.error(f"Error approving payment {payment_id}: {e}", exc_info=True)
-        await callback_query.answer(f"Error: {str(e)}", show_alert=True)
 
+
+# =============================================================================
+# CALLBACK: Rejection
+# =============================================================================
 
 @payment_router.callback_query(F.data.startswith('reject_payment_'))
 async def handle_rejection(
@@ -317,120 +242,72 @@ async def handle_rejection(
         session: Session,
         message_manager: MessageManager
 ):
-    """
-    Reject payment.
+    """Reject payment."""
+    if not is_admin(callback_query.from_user.id):
+        return
 
-    Transaction:
-        1. Update payment.status = 'failed'
-        2. Set payment.confirmedBy (for audit trail)
-        3. Create notification for user
-        4. Commit transaction
-
-    Note: No balance changes needed for rejection.
-
-    Callback data format: reject_payment_{payment_id}
-    """
-    # Extract payment ID
     try:
         payment_id = int(callback_query.data.split('_')[-1])
     except (ValueError, IndexError):
         logger.error(f"Invalid callback data: {callback_query.data}")
-        await callback_query.answer("Invalid payment ID", show_alert=True)
         return
 
     logger.info(f"Admin {user.userID} rejecting payment {payment_id}")
 
     try:
-        # Start nested transaction
         session.begin_nested()
 
-        # Get payment with row lock
-        payment = session.query(Payment).filter_by(
-            paymentID=payment_id
-        ).with_for_update().first()
-
+        payment = session.query(Payment).filter_by(paymentID=payment_id).with_for_update().first()
         if not payment:
-            await callback_query.answer("Payment not found", show_alert=True)
             return
 
-        # Check payment can be rejected (status in check or pending)
         if payment.status not in ["check", "pending"]:
             session.rollback()
-
-            text, media_id, keyboard, parse_mode, disable_preview, _, _ = await MessageTemplates.generate_screen(
-                user,
-                'admin_payment_wrong_status',
-                {
-                    'payment_id': payment_id,
-                    'status': payment.status
-                }
+            await message_manager.send_template(
+                user=user,
+                template_key='admin_payment_wrong_status',
+                variables={'payment_id': payment_id, 'status': payment.status},
+                update=callback_query,
+                edit=True
             )
-
-            await callback_query.message.edit_text(
-                text=text,
-                parse_mode=parse_mode,
-                reply_markup=keyboard,
-                disable_web_page_preview=disable_preview
-            )
-            await callback_query.answer("Payment already processed", show_alert=True)
             return
 
-        # Get payer for notification
         payer = session.query(User).filter_by(userID=payment.userID).first()
-
         if not payer:
             session.rollback()
             logger.error(f"User not found for payment {payment_id}")
-            await callback_query.answer("User not found", show_alert=True)
             return
 
-        # =====================================================================
-        # TRANSACTION: Reject payment
-        # =====================================================================
-
-        # 1. Update payment status
         payment.status = "failed"
         payment.confirmedBy = str(callback_query.from_user.id)
         payment.confirmationTime = datetime.now(timezone.utc)
 
-        # 2. Create notification for user
-        await create_user_payment_notification(
-            payment, payer, is_approved=False, session=session
-        )
+        await create_user_payment_notification(payment, payer, is_approved=False, session=session)
 
-        # 3. Commit transaction
         session.commit()
 
         logger.info(f"Payment {payment_id} rejected by admin {user.userID}")
 
-        # =====================================================================
-        # Update admin message
-        # =====================================================================
-
-        text, media_id, keyboard, parse_mode, disable_preview, _, _ = await MessageTemplates.generate_screen(
-            user,
-            'admin_payment_rejected',
-            {
+        await message_manager.send_template(
+            user=user,
+            template_key='admin_payment_rejected',
+            variables={
                 'payment_id': payment_id,
                 'user_name': payer.firstname,
                 'user_id': payer.userID
-            }
+            },
+            update=callback_query,
+            edit=True
         )
-
-        await callback_query.message.edit_text(
-            text=text,
-            parse_mode=parse_mode,
-            reply_markup=keyboard,
-            disable_web_page_preview=disable_preview
-        )
-
-        await callback_query.answer("❌ Payment rejected", show_alert=False)
 
     except Exception as e:
         session.rollback()
         logger.error(f"Error rejecting payment {payment_id}: {e}", exc_info=True)
-        await callback_query.answer(f"Error: {str(e)}", show_alert=True)
 
+
+# =============================================================================
+# CALLBACK: Cancel
+# =============================================================================
 
 @payment_router.callback_query(F.data == 'cancel_approval')
 async def handle_cancel_approval(
@@ -439,21 +316,21 @@ async def handle_cancel_approval(
         session: Session,
         message_manager: MessageManager
 ):
-    """
-    Cancel approval flow - return to original notification.
+    """Cancel approval flow."""
+    if not is_admin(callback_query.from_user.id):
+        return
 
-    This is called when admin clicks "Cancel" on confirmation dialog.
-    """
     logger.info(f"Admin {user.userID} cancelled approval flow")
 
-    await callback_query.answer("Cancelled", show_alert=False)
-
-    # Delete the confirmation message
     try:
         await callback_query.message.delete()
     except Exception as e:
         logger.warning(f"Could not delete message: {e}")
 
+
+# =============================================================================
+# COMMAND: &check / &checkpayments
+# =============================================================================
 
 @payment_router.message(F.text.regexp(r'^&check(payments)?$'))
 async def cmd_checkpayments(
@@ -462,70 +339,77 @@ async def cmd_checkpayments(
         session: Session,
         message_manager: MessageManager
 ):
-    """
-    Check pending payments and recreate admin notifications.
+    """Check pending payments and recreate admin notifications."""
+    if not is_admin(message.from_user.id):
+        return
 
-    Usage: &check or &checkpayments
-    """
-    from sqlalchemy import func
     from handlers.payments import create_payment_check_notification
 
     logger.info(f"Admin {message.from_user.id} triggered &checkpayments")
 
-    reply = await message.reply("🔍 Проверяю платежи...")
+    # Use template for loading state
+    status_msg = await message_manager.send_template(
+        user=user,
+        template_key='admin/check/loading',
+        update=message
+    )
 
     try:
         pending_payments = session.query(Payment).filter_by(status="check").all()
-        total_amount = session.query(func.sum(Payment.amount)).filter_by(
-            status="check"
-        ).scalar() or 0
+        total_amount = session.query(func.sum(Payment.amount)).filter_by(status="check").scalar() or 0
 
-        if pending_payments:
-            report = f"💰 В системе ожидает проверки {len(pending_payments)} платежей на сумму ${total_amount:.2f}"
+        if not pending_payments:
+            await message_manager.send_template(
+                user=user,
+                template_key='admin/check/no_pending',
+                update=status_msg,
+                edit=True
+            )
+            return
 
-            # Delete old notifications
-            for payment in pending_payments:
-                existing_notifications = session.query(Notification).filter(
-                    Notification.source == "payment_checker",
-                    Notification.text.like(f"%payment_id: {payment.paymentID}%")
-                ).all()
+        # Delete old notifications
+        for payment in pending_payments:
+            existing = session.query(Notification).filter(
+                Notification.source == "payment_checker",
+                Notification.text.like(f"%payment_id: {payment.paymentID}%")
+            ).all()
+            for notif in existing:
+                session.delete(notif)
+        session.commit()
 
-                for notif in existing_notifications:
-                    session.delete(notif)
+        # Create new notifications
+        notifications_created = 0
+        for payment in pending_payments:
+            payer = session.query(User).filter_by(userID=payment.userID).first()
+            if not payer:
+                continue
+            try:
+                await create_payment_check_notification(payment, payer, session)
+                notifications_created += 1
+            except Exception as e:
+                logger.error(f"Error creating notification for payment {payment.paymentID}: {e}")
 
-            session.commit()
-
-            # Create new notifications
-            notifications_created = 0
-            for payment in pending_payments:
-                payer = session.query(User).filter_by(userID=payment.userID).first()
-                if not payer:
-                    continue
-
-                try:
-                    await create_payment_check_notification(payment, payer, session)
-                    notifications_created += 1
-                except Exception as e:
-                    logger.error(f"Error creating notification for payment {payment.paymentID}: {e}")
-
-            report += f"\n✅ Создано {notifications_created} новых уведомлений для администраторов"
-            await reply.edit_text(report)
-        else:
-            await reply.edit_text("✅ Непроверенных платежей нет")
+        await message_manager.send_template(
+            user=user,
+            template_key='admin/check/report',
+            variables={
+                'count': len(pending_payments),
+                'total_amount': f"{float(total_amount):,.2f}",
+                'notifications_created': notifications_created
+            },
+            update=status_msg,
+            edit=True
+        )
 
     except Exception as e:
-        error_msg = f"❌ Ошибка при проверке платежей: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        await reply.edit_text(error_msg)
+        logger.error(f"Error in &checkpayments: {e}", exc_info=True)
+        await message_manager.send_template(
+            user=user,
+            template_key='admin/check/error',
+            variables={'error': str(e)},
+            update=status_msg,
+            edit=True
+        )
 
 
-# =============================================================================
-# EXPORTS
-# =============================================================================
-
-__all__ = [
-    'payment_router',
-    'handle_initial_approval',
-    'handle_final_approval',
-    'handle_rejection',
-]
+__all__ = ['payment_router']
