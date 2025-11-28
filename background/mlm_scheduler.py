@@ -178,34 +178,85 @@ class MLMScheduler:
     # ═══════════════════════════════════════════════════════════════════
 
     async def checkScheduledTasks(self):
-        """Check and execute scheduled tasks."""
+        """
+        Check and execute scheduled tasks based on Time Machine time.
+
+        Tasks are executed sequentially by day:
+        - Day 1: Reset volumes, process Autoship
+        - Day 2: Reset Grace Day streaks
+        - Day 3: Calculate Global Pool
+        - Day 5: Process monthly payments
+
+        Each task runs ONCE per month, tracked in DB (SystemTime.schedulerState).
+        Survives bot restarts.
+        """
+        from models.mlm.system_time import SystemTime
+
         currentTime = timeMachine.now
         currentDay = currentTime.day
         currentMonth = currentTime.strftime('%Y-%m')
-        currentHour = currentTime.hour
 
-        # Daily tasks at 00:00 (handled by APScheduler cron job now)
-        # This method now only handles monthly tasks
+        with get_db_session_ctx() as session:
+            # Get or create SystemTime record
+            state = session.query(SystemTime).first()
+            if not state:
+                state = SystemTime()
+                session.add(state)
+                session.flush()
 
-        # Monthly tasks
-        if self.lastMonth != currentMonth:
-            # 1st of month at 00:00 - reset volumes, process Autoship
-            if currentDay == 1 and currentHour == 0:
+            # Initialize schedulerState if needed
+            if not state.schedulerState:
+                state.schedulerState = {}
+
+            # Initialize current month if needed
+            if currentMonth not in state.schedulerState:
+                state.schedulerState[currentMonth] = {
+                    'day1': False,
+                    'day2': False,
+                    'day3': False,
+                    'day5': False
+                }
+
+            tasks = state.schedulerState[currentMonth]
+            executed_any = False
+
+            # Day 1: Reset volumes, process Autoship
+            if currentDay >= 1 and not tasks.get('day1'):
+                logger.info(f"Executing Day 1 tasks for {currentMonth}")
                 await self.executeFirstOfMonthTasks()
+                tasks['day1'] = True
+                executed_any = True
 
-            # ✨ NEW: 2nd of month at 00:00 - reset Grace Day streaks
-            elif currentDay == 2 and currentHour == 0:
+            # Day 2: Reset Grace Day streaks
+            if currentDay >= 2 and not tasks.get('day2'):
+                logger.info(f"Executing Day 2 tasks for {currentMonth}")
                 await self.executeSecondOfMonthTasks()
+                tasks['day2'] = True
+                executed_any = True
 
-            # 3rd of month at 00:00 - calculate Global Pool
-            elif currentDay == 3 and currentHour == 0:
+            # Day 3: Calculate Global Pool
+            if currentDay >= 3 and not tasks.get('day3'):
+                logger.info(f"Executing Day 3 tasks for {currentMonth}")
                 await self.executeThirdOfMonthTasks()
+                tasks['day3'] = True
+                executed_any = True
 
-            # 5th of month at 10:00 - distribute payments
-            elif currentDay == 5 and currentHour == 10:
+            # Day 5: Process monthly payments
+            if currentDay >= 5 and not tasks.get('day5'):
+                logger.info(f"Executing Day 5 tasks for {currentMonth}")
                 await self.executeFifthOfMonthTasks()
+                tasks['day5'] = True
+                executed_any = True
 
-            # Update last month after all tasks done
+            # Save state to DB
+            if executed_any:
+                state.schedulerState[currentMonth] = tasks
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(state, 'schedulerState')
+                session.commit()
+                logger.info(f"Scheduler state saved: {currentMonth} = {tasks}")
+
+            # Update lastMonth for backward compatibility
             if currentDay > 5:
                 self.lastMonth = currentMonth
 
