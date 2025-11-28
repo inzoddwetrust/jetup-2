@@ -193,7 +193,7 @@ async def handle_finances(
 
     user_payments_total = session.query(func.sum(Payment.amount)).filter(
         Payment.userID == user.userID,
-        Payment.status == 'paid'
+        Payment.status == 'confirmed'
     ).scalar() or Decimal('0')
 
     user_bonuses_total = session.query(func.sum(Bonus.bonusAmount)).filter(

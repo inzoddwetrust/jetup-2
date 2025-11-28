@@ -562,7 +562,7 @@ async def paid_invoices_handler(
 
     paid_invoices = session.query(Payment).filter(
         Payment.userID == user.userID,
-        Payment.status == 'paid'
+        Payment.status == 'confirmed'
     ).order_by(Payment.createdAt.desc()).limit(10).all()
 
     if paid_invoices:
