@@ -303,6 +303,18 @@ async def cmd_time(
 
         timeMachine.setTime(dt)
         logger.warning(f"Time Machine set to {dt} by admin {message.from_user.id}")
+
+        # Immediately trigger scheduled tasks check for new time
+        try:
+            from core.di import get_service
+            from core.system_services import ServiceManager
+            service_manager = get_service(ServiceManager)
+            if service_manager and hasattr(service_manager, 'mlm_scheduler') and service_manager.mlm_scheduler:
+                await service_manager.mlm_scheduler.checkScheduledTasks()
+                logger.info("Triggered checkScheduledTasks after Time Machine change")
+        except Exception as e:
+            logger.error(f"Failed to trigger scheduled tasks: {e}")
+
         await message_manager.send_template(
             user=user,
             template_key='admin/time/set',
@@ -312,7 +324,6 @@ async def cmd_time(
 
     except ImportError:
         await message_manager.send_template(user=user, template_key='admin/time/error', update=message)
-
 
 # =============================================================================
 # &testmail - Test Email (FULL TALENTIR PATTERN)

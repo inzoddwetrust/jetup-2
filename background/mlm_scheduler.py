@@ -493,7 +493,7 @@ class MLMScheduler:
         # Find pending bonuses that should be paid on 5th
         pendingBonuses = session.query(Bonus).filter(
             Bonus.status == "pending",
-            Bonus.commissionType.in_(["differential", "global_pool"])
+            Bonus.commissionType.in_(["differential", "global_pool", "system_compression"])
         ).all()
 
         if not pendingBonuses:
