@@ -51,6 +51,9 @@ class VolumeService:
         # 3. Queue Total Volume recalculation for entire upline (async)
         await self._queueUplineRecalculation(user.userID)
 
+        # ✅ FIX: Commit changes so isActive and PV persist to DB
+        self.session.commit()
+
         logger.info(f"Purchase volumes updated, queued TV recalculation")
 
     async def recalculateTotalVolume(self, userId: int) -> bool:
@@ -179,34 +182,13 @@ class VolumeService:
 
         return tv_json
 
-    async def getBestBranches(
-            self,
-            userId: int,
-            count: int = 2
-    ) -> List[Dict]:
-        """
-        Get top N branches with Directors for a user.
-        Used by Global Pool service.
-
-        CRITICAL: Must prioritize branches WITH Directors over volume!
-
-        Args:
-            userId: User ID
-            count: Number of top branches to return
-
-        Returns:
-            List of branches sorted by:
-            1. Has Director (priority)
-            2. Volume (secondary)
-        """
+    async def getBestBranches(self, userId: int, count: int = 2) -> List[Dict]:
         user = self.session.query(User).filter_by(userID=userId).first()
         if not user:
             return []
 
-        # Get branches data
         branches_data = await self._calculateBranchesVolumes(userId)
 
-        # Convert to format expected by GlobalPoolService
         branches = []
         for branch in branches_data:
             referral = self.session.query(User).filter_by(
@@ -214,6 +196,8 @@ class VolumeService:
             ).first()
 
             if referral:
+                self.session.refresh(referral)
+
                 has_director = await self._checkForDirectorInBranch(referral)
 
                 branches.append({
@@ -223,11 +207,8 @@ class VolumeService:
                     "hasDirector": has_director
                 })
 
-        # ✅ FIX: Sort by hasDirector FIRST, then by volume
-        # This ensures branches with Directors are prioritized
         branches.sort(key=lambda x: (not x["hasDirector"], -x["volume"]))
 
-        # Log for debugging
         if len(branches) >= count:
             selected = branches[:count]
             directors_count = sum(1 for b in selected if b["hasDirector"])

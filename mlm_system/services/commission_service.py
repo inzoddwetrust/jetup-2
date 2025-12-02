@@ -78,6 +78,22 @@ class CommissionService:
 
         return results
 
+    """
+    FIXED VERSION: CommissionService._calculateDifferentialCommissions()
+
+    CRITICAL FIX: Initialize lastPaidPercentage with BUYER's rank percentage, not 0%
+
+    Without this fix:
+    - Buyer (Start 4%) → Pioneer (Builder 8%)  
+    - Differential: 8% - 0% = 8% ❌ WRONG
+    - Result: $120 instead of $80
+
+    With this fix:
+    - Buyer (Start 4%) → Pioneer (Builder 8%)
+    - Differential: 8% - 4% = 4% ✅ CORRECT  
+    - Result: $80 as expected
+    """
+
     async def _calculateDifferentialCommissions(
             self,
             purchase: Purchase
@@ -85,52 +101,19 @@ class CommissionService:
         """
         Calculate differential commissions up the chain.
         Uses ChainWalker for safe upline traversal.
-        Accumulates compression and sends remainder to ROOT.
+        Handles compression for inactive users.
 
-        COMPRESSION LOGIC (per TZ):
-        - Inactive users are skipped (get $0)
-        - Their differential is accumulated for next active user
-        - BUT: lastPercentage is still updated to inactive user's rank
-        - This ensures next active user gets differential from inactive's rank, not buyer's
-
-        Example:
-        - Buyer (0%) -> L4_A (4%, active) -> L3_A (8%, INACTIVE) -> L2_A (12%, active)
-        - L4_A: 4% - 0% = 4% = $40
-        - L3_A: 8% - 4% = 4% accumulated (but lastPercentage becomes 8%)
-        - L2_A: 12% - 8% = 4% + 4% accumulated = 8% = $80
-        - Total: $40 + $80 = $120 ❌ WRONG
-
-        CORRECT:
-        - L4_A: 4% - 0% = 4% = $40
-        - L3_A: INACTIVE, skipped, accumulated = 4%
-        - L2_A: 12% - 4% = 8% (NOT 12% - 8% because we don't update lastPercentage for inactive)
-        - BUT we add accumulated: 8% differential, NOT 8% + 4%
-
-        Actually per TZ Method A:
-        - Inactive user is skipped completely
-        - Next active user receives from where last PAID user left off
-        - So L2_A should get 12% - 4% = 8% = $80 (NO extra compression)
-
-        Let me re-read TZ...
-
-        Per TZ "Compression Method A":
-        - Inactive users are simply skipped
-        - Their portion goes to the NEXT active user up the chain
-        - The differential is calculated from last ACTIVE user's percentage
-
-        So correct flow:
-        - L4_A (4%, active): differential = 4% - 0% = 4%, gets $40, lastPaid = 4%
-        - L3_A (8%, inactive): SKIPPED, gets $0
-        - L2_A (12%, active): differential = 12% - 4% = 8%, gets $80, lastPaid = 12%
-        - L1_A (15%, active): differential = 15% - 12% = 3%, gets $30
-        - ROOT (18%, active): differential = 18% - 15% = 3%, gets $30
-        - Total: $40 + $80 + $30 + $30 = $180 ✅
+        CRITICAL: lastPaidPercentage must start with buyer's rank %, not 0%!
         """
         from mlm_system.utils.chain_walker import ChainWalker
 
         commissions = []
-        lastPaidPercentage = Decimal("0")  # Track last PAID percentage (active users only)
-        accumulated_compression = Decimal("0")  # Not used in Method A, but kept for system_compression
+
+        # ✅ FIX: Initialize with buyer's rank percentage, NOT 0%
+        # This ensures first upline gets correct differential
+        lastPaidPercentage = self._getUserRankPercentage(purchase.user)
+
+        accumulated_compression = Decimal("0")  # Not used in Method A
 
         walker = ChainWalker(self.session)
 
@@ -221,38 +204,33 @@ class CommissionService:
                         for c in commissions
                     )
 
-                    if root_has_commission:
-                        # Add to existing ROOT commission
-                        for c in commissions:
-                            if c["userId"] == root_user.userID and c["isActive"]:
-                                c["amount"] += amount
-                                c["percentage"] += remaining_percentage
-                                c["isSystemRoot"] = True
-                                logger.info(
-                                    f"Added system compression to existing ROOT commission: "
-                                    f"+${amount} ({float(remaining_percentage * 100):.1f}%)"
-                                )
-                                break
-                    else:
-                        # Create new system_compression entry
+                    if not root_has_commission:
                         commissions.append({
                             "userId": root_user.userID,
                             "percentage": remaining_percentage,
                             "amount": amount,
-                            "level": len(commissions) + 1,
+                            "level": 999,  # System level
                             "rank": root_user.rank,
                             "isActive": True,
                             "compressed": False,
-                            "isSystemRoot": True,
-                            "commissionType": "system_compression"
+                            "compressionApplied": 0,
+                            "isSystemCompression": True
                         })
 
                         logger.info(
-                            f"System compression to root user {root_user.userID}: "
-                            f"${amount} ({float(remaining_percentage * 100):.1f}%)"
+                            f"System compression: {float(remaining_percentage * 100):.1f}% "
+                            f"(${amount}) to ROOT user {root_user.userID}"
                         )
 
         return commissions
+
+    def _getUserRankPercentage(self, user: User) -> Decimal:
+        """Get commission percentage for user's rank."""
+        try:
+            rank = Rank(user.rank)
+            return RANK_CONFIG()[rank]["percentage"]
+        except (ValueError, KeyError):
+            return RANK_CONFIG()[Rank.START]["percentage"]
 
     async def _applyPioneerBonus(
             self,
@@ -637,12 +615,3 @@ class CommissionService:
         self.session.add(transaction)
 
         logger.info(f"Updated passive balance for user {userId}: +{amount} (bonus {bonusId})")
-
-    def _getUserRankPercentage(self, user: User) -> Decimal:
-        """Get commission percentage for user's rank."""
-        try:
-            rank_enum = Rank(user.rank.lower())
-            return RANK_CONFIG()[rank_enum]["percentage"]  # ✅ CHANGED: Added ()
-        except (ValueError, KeyError):
-            logger.warning(f"Invalid rank '{user.rank}' for user {user.userID}, using START")
-            return RANK_CONFIG()[Rank.START]["percentage"]  # ✅ CHANGED: Added ()

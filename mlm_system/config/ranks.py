@@ -1,4 +1,3 @@
-# mlm_system/config/ranks.py
 """
 MLM ranks configuration and constants.
 Loads from Google Sheets via Config module.
@@ -48,6 +47,7 @@ def get_rank_config() -> Dict[Rank, Dict[str, Any]]:
             # Convert numeric values to Decimal
             rank_config[rank_enum] = {
                 "percentage": Decimal(str(rank_data["percentage"])) / 100,  # Convert % to decimal
+                "personalVolumeRequired": Decimal(str(rank_data.get("personalVolumeRequired", "0"))),  # ✅ NEW: Added PV requirement
                 "teamVolumeRequired": Decimal(str(rank_data["teamVolumeRequired"])),
                 "activePartnersRequired": int(rank_data["activePartnersRequired"]),
                 "displayName": rank_data["displayName"]
