@@ -112,10 +112,10 @@ class ServiceManager:
         # ═══════════════════════════════════════════════════════════════
         # SERVICE 5: Webhook Server (Google Sheets Sync)
         # ═══════════════════════════════════════════════════════════════
-        from sync_system.webhook_handler import start_webhook_server
 
         try:
-            await start_webhook_server()
+            from sync_system.webhook_handler import start_webhook_server
+            webhook_runner = await start_webhook_server()
             # Note: webhook_runner is aiohttp.web.AppRunner, not asyncio.Task
             logger.info("✓ Webhook server started for Google Sheets sync")
         except Exception as e:

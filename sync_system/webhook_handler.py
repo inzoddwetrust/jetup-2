@@ -433,7 +433,7 @@ async def start_webhook_server():
         handler = WebhookHandler()
 
         host = Config.get('WEBHOOK_HOST', '127.0.0.1')
-        port = Config.get('WEBHOOK_PORT', 8080)
+        port = Config.get('WEBHOOK_PORT', 8081)
 
         runner = await handler.start(
             host=host,

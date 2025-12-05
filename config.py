@@ -102,6 +102,15 @@ class Config:
     BSCSCAN_API_KEY = "BSCSCAN_API_KEY"
     TRON_API_KEY = "TRON_API_KEY"
 
+    # Webhook (Google Sheets Sync)
+    WEBHOOK_SECRET_KEY = "WEBHOOK_SECRET_KEY"
+    WEBHOOK_PORT = "WEBHOOK_PORT"
+    WEBHOOK_HOST = "WEBHOOK_HOST"
+    WEBHOOK_HEALTH_TOKEN = "WEBHOOK_HEALTH_TOKEN"
+    WEBHOOK_RATE_LIMIT_REQUESTS = "WEBHOOK_RATE_LIMIT_REQUESTS"
+    WEBHOOK_RATE_LIMIT_WINDOW = "WEBHOOK_RATE_LIMIT_WINDOW"
+    WEBHOOK_ALLOWED_IPS = "WEBHOOK_ALLOWED_IPS"
+
     # System
     SYSTEM_READY = "SYSTEM_READY"
     BOT_USERNAME = "BOT_USERNAME"
@@ -330,6 +339,21 @@ class Config:
             cls._config[cls.ETHERSCAN_API_KEY] = os.getenv("ETHERSCAN_API_KEY")
             cls._config[cls.BSCSCAN_API_KEY] = os.getenv("BSCSCAN_API_KEY")
             cls._config[cls.TRON_API_KEY] = os.getenv("TRON_API_KEY")
+
+            # ─────────────────────────────────────────────────────────────────
+            # Webhook (Google Sheets Sync)
+            # ─────────────────────────────────────────────────────────────────
+            cls._config[cls.WEBHOOK_SECRET_KEY] = os.getenv("WEBHOOK_SECRET_KEY")
+            cls._config[cls.WEBHOOK_PORT] = int(os.getenv("WEBHOOK_PORT", "8080"))
+            cls._config[cls.WEBHOOK_HOST] = os.getenv("WEBHOOK_HOST", "127.0.0.1")
+            cls._config[cls.WEBHOOK_HEALTH_TOKEN] = os.getenv("WEBHOOK_HEALTH_TOKEN")
+            cls._config[cls.WEBHOOK_RATE_LIMIT_REQUESTS] = int(os.getenv("WEBHOOK_RATE_LIMIT_REQUESTS", "30"))
+            cls._config[cls.WEBHOOK_RATE_LIMIT_WINDOW] = int(os.getenv("WEBHOOK_RATE_LIMIT_WINDOW", "60"))
+
+            webhook_ips = os.getenv("WEBHOOK_ALLOWED_IPS", "")
+            cls._config[cls.WEBHOOK_ALLOWED_IPS] = [
+                ip.strip() for ip in webhook_ips.split(",") if ip.strip()
+            ]
 
             # ─────────────────────────────────────────────────────────────────
             # System
