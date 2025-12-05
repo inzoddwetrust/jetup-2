@@ -11,7 +11,6 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from config import Config
-from core.google_services import get_google_services
 from sync_system.sync_config import (
     SYNC_CONFIG, validate_upliner, validate_foreign_key, get_default_referrer_id
 )
@@ -38,12 +37,16 @@ class UniversalSyncEngine:
         try:
             records = session.query(self.model).all()
 
+            # Определяем поля для экспорта из sync_config
+            readonly = self.config.get('readonly_fields', [])
+            editable = self.config.get('editable_fields', [])
+            export_fields = readonly + editable
+
             data = []
             for record in records:
                 row = {}
-                for column in self.model.__table__.columns:
-                    field_name = column.name
-                    value = getattr(record, field_name)
+                for field_name in export_fields:  # ← ИЗМЕНЕНО: только нужные поля
+                    value = getattr(record, field_name, None)  # ← ИЗМЕНЕНО: добавил default
 
                     # Convert special types
                     if isinstance(value, datetime):
