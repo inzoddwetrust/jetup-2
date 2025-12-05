@@ -1,6 +1,6 @@
-# bot/config/payment.py
 """
 Payment model - tracks deposits and withdrawals.
+FIXED: Increased DECIMAL precision to support large crypto amounts.
 """
 from sqlalchemy import Column, Integer, String, DECIMAL, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
@@ -22,9 +22,15 @@ class Payment(Base, AuditMixin):
 
     # Payment details
     direction = Column(String, nullable=False)  # 'in' (пополнение) или 'out' (вывод)
-    amount = Column(DECIMAL(12, 2), nullable=False)  # Сумма в USD
+
+    # FIXED: DECIMAL(18, 2) instead of (12, 2) to support large amounts
+    amount = Column(DECIMAL(18, 2), nullable=False)  # Сумма в USD (up to 9,999,999,999,999,999.99)
+
     method = Column(String, nullable=False)  # USDT-TRC20, ETH, BNB и т.д.
-    sumCurrency = Column(DECIMAL(12, 8))  # Для криптовалют нужна большая точность
+
+    # FIXED: DECIMAL(20, 8) instead of (12, 8) to support large crypto amounts
+    # Supports up to 999,999,999,999.99999999 (e.g. 1M USDT with 8 decimals precision)
+    sumCurrency = Column(DECIMAL(20, 8))  # Сумма в криптовалюте
 
     # Wallet addresses
     fromWallet = Column(String, nullable=True)  # Откуда пришла транзакция

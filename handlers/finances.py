@@ -339,7 +339,7 @@ async def handle_csv_download(
     # Show generating status
     await message_manager.send_template(
         user=user,
-        template_key='csv_generating',
+        template_key='/download/csv/report_generating',
         update=callback_query,
         variables={'report_type': f'{balance_type}_balance'}
     )
@@ -359,7 +359,7 @@ async def handle_csv_download(
             # Show error
             await message_manager.send_template(
                 user=user,
-                template_key='csv_error',
+                template_key='/download/csv/report_error',
                 update=callback_query.message,
                 variables={'error': 'Failed to generate report'}
             )
@@ -368,7 +368,7 @@ async def handle_csv_download(
         # Show ready status
         await message_manager.send_template(
             user=user,
-            template_key='csv_ready',
+            template_key='/download/csv/report_ready',
             update=callback_query.message,
             variables={'report_type': f'{balance_type}_balance'}
         )
@@ -389,7 +389,7 @@ async def handle_csv_download(
 
         await message_manager.send_template(
             user=user,
-            template_key='csv_error',
+            template_key='/download/csv/report_error',
             update=callback_query.message,
             variables={'error': str(e)}
         )

@@ -261,6 +261,9 @@ class CommissionService:
                 commission["pioneerBonus"] = pioneer_amount
                 commission["amount"] += pioneer_amount
 
+                # ✅ FIX: Update percentage to reflect total effective rate
+                commission["percentage"] += PIONEER_BONUS_PERCENTAGE
+
                 logger.info(
                     f"Pioneer bonus +${pioneer_amount} applied for user {user.userID} "
                     f"on purchase {purchase.purchaseID}"

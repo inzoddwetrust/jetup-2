@@ -1,8 +1,9 @@
 # bot/config/bonus.py
 """
 Bonus model - tracks all referral commissions and bonuses.
+FIXED: Changed bonusRate from Float to DECIMAL for precise percentage calculations.
 """
-from sqlalchemy import Column, Integer, String, Float, DECIMAL, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, DECIMAL, Text, ForeignKey
 from sqlalchemy.orm import relationship
 from models.base import Base, AuditMixin
 
@@ -32,9 +33,10 @@ class Bonus(Base, AuditMixin):
     sourceRank = Column(String, nullable=True)  # Ранг источника (для дифференциала)
 
     # Bonus calculation
-    bonusRate = Column(Float, nullable=False)  # Процент комиссии (0.04 для 4%)
+    # FIXED: DECIMAL(6, 5) instead of Float for precise percentage (e.g., 0.04000 = 4%)
+    bonusRate = Column(DECIMAL(6, 5), nullable=False)  # Процент комиссии (0.04 для 4%)
     bonusAmount = Column(DECIMAL(12, 2), nullable=False)  # Сумма бонуса
-    compressionApplied = Column(Integer, default=0)  # Было ли сжатие (0/1 для SQLite)
+    compressionApplied = Column(Integer, default=0)  # Было ли сжатие (0/1 for SQLite compatibility)
 
     # Status
     status = Column(String, default="pending")  # pending, processing, paid, cancelled, error

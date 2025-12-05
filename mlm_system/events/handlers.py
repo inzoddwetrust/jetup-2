@@ -451,6 +451,8 @@ async def _send_investment_bonus_notification(
             '/investment/bonus_granted',
             {
                 'bonus_amount': float(bonus_amount),
+                'purchase_amount': float(purchase.packPrice),  # ← ДОБАВИТЬ!
+                'options_qty': purchase.packQty,  # ← ДОБАВИТЬ!
                 'project_name': purchase.projectName or "JetUp",
                 'total_purchased': float(total_purchased),
                 'tier_percentage': tier_info['current_tier']['bonus_percentage'],

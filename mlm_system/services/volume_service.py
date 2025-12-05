@@ -196,8 +196,6 @@ class VolumeService:
             ).first()
 
             if referral:
-                self.session.refresh(referral)
-
                 has_director = await self._checkForDirectorInBranch(referral)
 
                 branches.append({
@@ -446,11 +444,14 @@ class VolumeService:
         Returns:
             List of branches with their full volumes
         """
-        # Get direct referrals
+        user = self.session.query(User).filter_by(userID=userId).first()
+        if not user:
+            return []
+
+        # Get direct referrals (exclude self-reference!)
         referrals = self.session.query(User).filter(
-            User.upline == self.session.query(User.telegramID).filter_by(
-                userID=userId
-            ).scalar_subquery()
+            User.upline == user.telegramID,
+            User.userID != userId  # ✅ FIX: Exclude self-reference
         ).all()
 
         branches = []
@@ -505,12 +506,21 @@ class VolumeService:
         Check if there's a Director rank in the branch.
         Used by Global Pool service.
         Uses ChainWalker for safe downline traversal.
+
+        ✅ FIX: Refreshes root and expires cache to ensure all rank checks use fresh data
         """
         from mlm_system.utils.chain_walker import ChainWalker
+
+        # ✅ FIX: Refresh root user to get latest rank
+        self.session.refresh(rootUser)
 
         # Check root first
         if rootUser.rank == "director":
             return True
+
+        # ✅ FIX: Expire cached objects before walk
+        # This ensures walk_downline queries get fresh rank values
+        self.session.expire_all()
 
         walker = ChainWalker(self.session)
         found_director = [False]  # Use list to allow modification in callback

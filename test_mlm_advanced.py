@@ -1088,6 +1088,11 @@ async def test_global_pool_2_directors():
 
         session.commit()
 
+        # ✅ DEBUG: Log actual userID
+        logger.info(f"TEST: Created test_user with userID={test_user.userID}, telegramID={test_user.telegramID}")
+        logger.info(f"TEST: Branch1 userID={branch1.userID}, rank={branch1.rank}")
+        logger.info(f"TEST: Branch2 userID={branch2.userID}, rank={branch2.rank}")
+
         # Test 1: With 2 Directors - should qualify
         global_pool_service = GlobalPoolService(session)
         result = await global_pool_service.checkUserQualification(test_user.userID)
@@ -1097,6 +1102,13 @@ async def test_global_pool_2_directors():
         branch2.rank = "growth"
         session.commit()
         session.expire_all()
+
+        # ✅ DEBUG: Verify DB has the change
+        branch2_reloaded = session.query(User).filter_by(userID=branch2.userID).first()
+        logger.info(f"TEST: DB verification - branch2 userID={branch2_reloaded.userID}, rank={branch2_reloaded.rank}")
+
+        # ✅ DEBUG: Log after downgrade
+        logger.info(f"TEST: After downgrade, branch2 userID={branch2.userID}, rank={branch2.rank}")
 
         # Test 2: With only 1 Director - should NOT qualify
         # This SHOULD fail until production bug is fixed
