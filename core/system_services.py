@@ -6,7 +6,6 @@ Handles service lifecycle, graceful shutdown, and resource initialization.
 import asyncio
 import logging
 import signal
-import traceback
 from typing import Dict, Any, List, Optional
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramAPIError
@@ -109,6 +108,19 @@ class ServiceManager:
         logger.info("=" * 60)
         logger.info(f"✅ STARTED {len(self.services)} background services + MLM Scheduler")
         logger.info("=" * 60)
+
+        # ═══════════════════════════════════════════════════════════════
+        # SERVICE 5: Webhook Server (Google Sheets Sync)
+        # ═══════════════════════════════════════════════════════════════
+        from sync_system.webhook_handler import start_webhook_server
+
+        try:
+            await start_webhook_server()
+            # Note: webhook_runner is aiohttp.web.AppRunner, not asyncio.Task
+            logger.info("✓ Webhook server started for Google Sheets sync")
+        except Exception as e:
+            logger.error(f"Failed to start webhook server: {e}", exc_info=True)
+            # Continue without webhook - it's not critical for bot operation
 
     async def stop_services(self) -> None:
         """Stop all background services gracefully."""

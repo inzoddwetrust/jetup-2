@@ -45,10 +45,56 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+# ==============================================================================
+# PRE-FLIGHT CHECKS
+# ==============================================================================
+
+preflight_checks() {
+    log "Running pre-flight checks..."
+
+    # Check Python version (need 3.10+)
+    if command -v python3 &> /dev/null; then
+        PYTHON_VERSION=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+        PYTHON_MAJOR=$(echo $PYTHON_VERSION | cut -d. -f1)
+        PYTHON_MINOR=$(echo $PYTHON_VERSION | cut -d. -f2)
+
+        if [ "$PYTHON_MAJOR" -lt 3 ] || { [ "$PYTHON_MAJOR" -eq 3 ] && [ "$PYTHON_MINOR" -lt 10 ]; }; then
+            warn "Python $PYTHON_VERSION detected, but 3.10+ required"
+            info "Will install Python 3.10+ from deadsnakes PPA"
+        else
+            success "Python $PYTHON_VERSION OK"
+        fi
+    fi
+
+    # Check disk space (need at least 5GB)
+    AVAILABLE_SPACE=$(df /opt | tail -1 | awk '{print $4}')
+    REQUIRED_SPACE=$((5 * 1024 * 1024))  # 5GB in KB
+
+    if [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
+        error "Insufficient disk space"
+        error "Available: $(($AVAILABLE_SPACE / 1024 / 1024))GB, Required: 5GB"
+        exit 1
+    else
+        success "Disk space OK ($(($AVAILABLE_SPACE / 1024 / 1024))GB available)"
+    fi
+
+    # Check if PostgreSQL 14+ will be available
+    DEBIAN_VERSION=$(cat /etc/debian_version 2>/dev/null | cut -d. -f1)
+    if [ -n "$DEBIAN_VERSION" ] && [ "$DEBIAN_VERSION" -lt 12 ]; then
+        warn "Debian $DEBIAN_VERSION detected - may need PostgreSQL repo for version 14+"
+    fi
+
+    success "Pre-flight checks passed"
+}
+
 clear
 echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║         Jetup Bots Installation Script         ║${NC}"
 echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
+echo ""
+
+# Run pre-flight checks
+preflight_checks
 echo ""
 
 # Check for previous installation
@@ -391,21 +437,21 @@ install_bot() {
     log "Installing Python dependencies..."
     source "$INSTALL_DIR/venv/bin/activate"
     pip install --upgrade pip
-    
+
     # Install from requirements
     if [ -f "$INSTALL_DIR/app/requirements.txt" ]; then
         pip install -r "$INSTALL_DIR/app/requirements.txt"
     fi
-    
+
     # Add psycopg2-binary for PostgreSQL
     pip install psycopg2-binary
-    
+
     deactivate
 
     # Create .env template if doesn't exist
     if [ ! -f "$INSTALL_DIR/app/.env" ]; then
         log "Creating .env template..."
-        
+
         if [ "$SERVICE_NAME" = "jetup-bot" ]; then
             cat > "$INSTALL_DIR/app/.env" << EOF
 # Bot credentials
@@ -439,7 +485,7 @@ GOOGLE_CREDENTIALS_JSON=../../shared/creds/helpbot_key.json
 HELPBOT_GROUP_ID=YOUR_GROUP_ID_HERE
 EOF
         fi
-        
+
         chmod 600 "$INSTALL_DIR/app/.env"
     fi
 
@@ -456,11 +502,20 @@ Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR/app
 Environment="PATH=$INSTALL_DIR/venv/bin"
-ExecStart=$INSTALL_DIR/venv/bin/python $ENTRY_POINT
+ExecStart=$INSTALL_DIR/venv/bin/python $INSTALL_DIR/app/$ENTRY_POINT
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+
+# Resource limits
+LimitNOFILE=65536
+MemoryLimit=2G
+CPUQuota=200%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -601,7 +656,7 @@ case "${1:-}" in
                 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
                 BACKUP_DIR="/tmp/jetup_update_backup_${TIMESTAMP}"
                 mkdir -p "$BACKUP_DIR"
-                
+
                 echo "Creating backup before update..."
                 git status > "$BACKUP_DIR/git_status.txt" 2>/dev/null || true
                 git diff > "$BACKUP_DIR/git_diff.txt" 2>/dev/null || true
@@ -615,11 +670,49 @@ case "${1:-}" in
                     exit 0
                 fi
 
-                # Pull updates
-                if ! git pull origin "$BRANCH"; then
-                    echo "❌ Failed to pull updates"
-                    echo "Backup available at: $BACKUP_DIR"
-                    exit 1
+                # Pull updates with conflict resolution
+                echo "Pulling updates..."
+
+                # Try to pull with rebase first
+                if git pull --rebase origin "$BRANCH" 2>/dev/null; then
+                    echo "✓ Updates pulled successfully"
+                elif git pull --ff-only origin "$BRANCH" 2>/dev/null; then
+                    echo "✓ Updates pulled (fast-forward)"
+                else
+                    echo "❌ Cannot pull - conflicts detected or diverged branches"
+                    echo ""
+                    echo "Options:"
+                    echo "  1) Discard local changes (reset --hard)"
+                    echo "  2) Stash local changes and try again"
+                    echo "  3) Cancel update"
+                    echo ""
+                    read -p "Choose option [1-3]: " -n 1 -r
+                    echo
+
+                    case $REPLY in
+                        1)
+                            echo "Discarding local changes..."
+                            git reset --hard origin/$BRANCH
+                            echo "✓ Reset to origin/$BRANCH"
+                            ;;
+                        2)
+                            echo "Stashing local changes..."
+                            git stash save "Auto-stash before update $(date)"
+                            git pull origin "$BRANCH"
+                            echo "Attempting to restore stashed changes..."
+                            if git stash pop; then
+                                echo "✓ Stash restored successfully"
+                            else
+                                echo "⚠ Conflicts when restoring stash"
+                                echo "Resolve manually and run: git stash drop"
+                            fi
+                            ;;
+                        3|*)
+                            echo "Update cancelled"
+                            echo "Backup available at: $BACKUP_DIR"
+                            exit 1
+                            ;;
+                    esac
                 fi
 
                 # Update dependencies if needed
@@ -658,7 +751,7 @@ case "${1:-}" in
                 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
                 BACKUP_DIR="/tmp/jetup_update_backup_${TIMESTAMP}"
                 mkdir -p "$BACKUP_DIR"
-                
+
                 echo "Creating backup before update..."
                 git status > "$BACKUP_DIR/git_status.txt" 2>/dev/null || true
                 git diff > "$BACKUP_DIR/git_diff.txt" 2>/dev/null || true
@@ -672,11 +765,49 @@ case "${1:-}" in
                     exit 0
                 fi
 
-                # Pull updates
-                if ! git pull origin "$BRANCH"; then
-                    echo "❌ Failed to pull updates"
-                    echo "Backup available at: $BACKUP_DIR"
-                    exit 1
+                # Pull updates with conflict resolution
+                echo "Pulling updates..."
+
+                # Try to pull with rebase first
+                if git pull --rebase origin "$BRANCH" 2>/dev/null; then
+                    echo "✓ Updates pulled successfully"
+                elif git pull --ff-only origin "$BRANCH" 2>/dev/null; then
+                    echo "✓ Updates pulled (fast-forward)"
+                else
+                    echo "❌ Cannot pull - conflicts detected or diverged branches"
+                    echo ""
+                    echo "Options:"
+                    echo "  1) Discard local changes (reset --hard)"
+                    echo "  2) Stash local changes and try again"
+                    echo "  3) Cancel update"
+                    echo ""
+                    read -p "Choose option [1-3]: " -n 1 -r
+                    echo
+
+                    case $REPLY in
+                        1)
+                            echo "Discarding local changes..."
+                            git reset --hard origin/$BRANCH
+                            echo "✓ Reset to origin/$BRANCH"
+                            ;;
+                        2)
+                            echo "Stashing local changes..."
+                            git stash save "Auto-stash before update $(date)"
+                            git pull origin "$BRANCH"
+                            echo "Attempting to restore stashed changes..."
+                            if git stash pop; then
+                                echo "✓ Stash restored successfully"
+                            else
+                                echo "⚠ Conflicts when restoring stash"
+                                echo "Resolve manually and run: git stash drop"
+                            fi
+                            ;;
+                        3|*)
+                            echo "Update cancelled"
+                            echo "Backup available at: $BACKUP_DIR"
+                            exit 1
+                            ;;
+                    esac
                 fi
 
                 # Update dependencies if needed
@@ -699,12 +830,12 @@ case "${1:-}" in
                 echo "=== Updating Main Bot ==="
                 cd "$INSTALL_BASE/bot/app"
                 BRANCH=$(git branch --show-current)
-                
+
                 if ! git diff-index --quiet HEAD --; then
                     echo "⚠ Bot has uncommitted changes"
                     git status --short
                 fi
-                
+
                 git fetch origin
                 if ! git diff --quiet HEAD origin/$BRANCH; then
                     echo "Pulling bot updates..."
@@ -723,12 +854,12 @@ case "${1:-}" in
                 echo "=== Updating Helpbot ==="
                 cd "$INSTALL_BASE/helpbot/app"
                 BRANCH=$(git branch --show-current)
-                
+
                 if ! git diff-index --quiet HEAD --; then
                     echo "⚠ Helpbot has uncommitted changes"
                     git status --short
                 fi
-                
+
                 git fetch origin
                 if ! git diff --quiet HEAD origin/$BRANCH; then
                     echo "Pulling helpbot updates..."
@@ -780,6 +911,15 @@ case "${1:-}" in
         rm -rf "backup_$TIMESTAMP"
 
         echo "✓ Backup created: $INSTALL_BASE/backups/daily/backup_$TIMESTAMP.tar.gz"
+
+        # Rotate old backups
+        echo "Rotating old backups..."
+        find "$INSTALL_BASE/backups/daily" -name "backup_*.tar.gz" -mtime +7 -delete
+        find "$INSTALL_BASE/backups/weekly" -name "backup_*.tar.gz" -mtime +30 -delete 2>/dev/null || true
+        find "$INSTALL_BASE/backups/monthly" -name "backup_*.tar.gz" -mtime +365 -delete 2>/dev/null || true
+
+        DAILY_COUNT=$(find "$INSTALL_BASE/backups/daily" -name "backup_*.tar.gz" | wc -l)
+        echo "✓ Rotation complete. Kept last 7 days ($DAILY_COUNT backups)"
         ;;
 
     db)
