@@ -37,16 +37,21 @@ class UniversalSyncEngine:
         try:
             records = session.query(self.model).all()
 
-            # Определяем поля для экспорта из sync_config
             readonly = self.config.get('readonly_fields', [])
             editable = self.config.get('editable_fields', [])
-            export_fields = readonly + editable
+            allowed_fields = set(readonly + editable)
 
             data = []
             for record in records:
                 row = {}
-                for field_name in export_fields:  # ← ИЗМЕНЕНО: только нужные поля
-                    value = getattr(record, field_name, None)  # ← ИЗМЕНЕНО: добавил default
+                for column in self.model.__table__.columns:
+                    field_name = column.name
+
+                    # Пропускаем поля, которых нет в sync_config
+                    if field_name not in allowed_fields:
+                        continue
+
+                    value = getattr(record, field_name, None)
 
                     # Convert special types
                     if isinstance(value, datetime):
