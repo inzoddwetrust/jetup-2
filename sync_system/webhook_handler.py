@@ -1,8 +1,10 @@
-# sync_system/webhook_handler.py
 """
-Webhook handler for exporting data from DB to Google Sheets.
-Accepts requests from Google Apps Script and returns JSON data.
+Webhook handler для экспорта данных из БД в Google Sheets
+Принимает запросы от Google Apps Script и возвращает JSON с данными
+Версия с улучшенной безопасностью и исправленной проверкой подписи
+Адаптирован для jetup-2
 """
+
 import logging
 import json
 from aiohttp import web
@@ -24,37 +26,41 @@ logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
-    """Simple rate limiter implementation."""
+    """Simple rate limiter implementation"""
 
     def __init__(self, max_requests: int = 10, time_window: int = 60):
         self.max_requests = max_requests
-        self.time_window = time_window
+        self.time_window = time_window  # seconds
         self.requests = defaultdict(list)
         self._cleanup_task = None
 
     def is_allowed(self, client_id: str) -> bool:
-        """Check if request is allowed for given client."""
+        """Check if request is allowed for given client"""
         now = datetime.now()
         cutoff_time = now - timedelta(seconds=self.time_window)
 
+        # Clean old requests
         self.requests[client_id] = [
             req_time for req_time in self.requests[client_id]
             if req_time > cutoff_time
         ]
 
+        # Check limit
         if len(self.requests[client_id]) >= self.max_requests:
             return False
 
+        # Add current request
         self.requests[client_id].append(now)
         return True
 
     async def cleanup_loop(self):
-        """Periodic cleanup of old entries."""
+        """Periodic cleanup of old entries"""
         while True:
-            await asyncio.sleep(300)
+            await asyncio.sleep(300)  # Clean every 5 minutes
             now = datetime.now()
             cutoff_time = now - timedelta(seconds=self.time_window * 2)
 
+            # Remove old client entries
             clients_to_remove = []
             for client_id, timestamps in self.requests.items():
                 if all(ts < cutoff_time for ts in timestamps):
@@ -68,42 +74,46 @@ class RateLimiter:
 
 
 class WebhookHandler:
-    """Webhook handler with enhanced security."""
+    """Обработчик webhook запросов от Google Sheets с улучшенной безопасностью"""
 
+    # Google Apps Script IP ranges
     ALLOWED_IP_RANGES = [
-        '34.64.0.0/10',
-        '35.184.0.0/13',
-        '35.192.0.0/11',
-        '35.224.0.0/12',
-        '35.240.0.0/13',
-        '104.154.0.0/15',
-        '104.196.0.0/14',
-        '107.167.160.0/19',
-        '107.178.192.0/18',
-        '108.59.80.0/20',
-        '108.170.192.0/18',
-        '130.211.0.0/16',
-        '146.148.0.0/17',
-        '162.216.148.0/22',
-        '162.222.176.0/21',
-        '173.255.112.0/20',
-        '192.158.28.0/22',
-        '199.192.112.0/22',
-        '199.223.232.0/21',
-        '208.68.108.0/22',
-        '23.236.48.0/20',
-        '23.251.128.0/19',
+        '34.64.0.0/10',  # Google Cloud
+        '35.184.0.0/13',  # Google Cloud
+        '35.192.0.0/11',  # Google Cloud
+        '35.224.0.0/12',  # Google Cloud
+        '35.240.0.0/13',  # Google Cloud
+        '104.154.0.0/15',  # Google Cloud
+        '104.196.0.0/14',  # Google Cloud
+        '107.167.160.0/19',  # Google Cloud
+        '107.178.192.0/18',  # Google Cloud
+        '108.59.80.0/20',  # Google Cloud
+        '108.170.192.0/18',  # Google Cloud
+        '130.211.0.0/16',  # Google Cloud
+        '146.148.0.0/17',  # Google Cloud
+        '162.216.148.0/22',  # Google Cloud
+        '162.222.176.0/21',  # Google Cloud
+        '173.255.112.0/20',  # Google Cloud
+        '192.158.28.0/22',  # Google Cloud
+        '199.192.112.0/22',  # Google Cloud
+        '199.223.232.0/21',  # Google Cloud
+        '208.68.108.0/22',  # Google Cloud
+        '23.236.48.0/20',  # Google Cloud
+        '23.251.128.0/19',  # Google Cloud
     ]
 
+    # Additional allowed IPs (for testing or specific services)
     ALLOWED_SPECIFIC_IPS: Set[str] = set()
 
     def __init__(self, secret_key: str = None):
         self.secret_key = secret_key or Config.get('WEBHOOK_SECRET_KEY')
 
+        # Security check: secret key must be configured
         if not self.secret_key or self.secret_key == "error":
             logger.critical("WEBHOOK_SECRET_KEY is not properly configured!")
             raise ValueError("WEBHOOK_SECRET_KEY must be set in environment")
 
+        # Initialize components
         self.app = web.Application()
 
         rate_limit_requests = Config.get('WEBHOOK_RATE_LIMIT_REQUESTS', 30)
@@ -114,12 +124,15 @@ class WebhookHandler:
             time_window=int(rate_limit_window) if rate_limit_window else 60
         )
 
+        # Health check token
         self.health_token = Config.get('WEBHOOK_HEALTH_TOKEN')
 
+        # Metrics
         self.request_count = 0
         self.error_count = 0
         self.last_request_time = None
 
+        # Load additional allowed IPs from config if available
         allowed_ips = Config.get('WEBHOOK_ALLOWED_IPS')
         if allowed_ips:
             if isinstance(allowed_ips, str):
@@ -130,87 +143,131 @@ class WebhookHandler:
         self.setup_routes()
         self.setup_middleware()
 
+        # Start cleanup task
         asyncio.create_task(self.rate_limiter.cleanup_loop())
 
     def setup_routes(self):
-        """Setup routes."""
+        """Настройка маршрутов"""
         self.app.router.add_post('/sync/export', self.handle_export)
         self.app.router.add_get('/sync/health', self.handle_health)
         self.app.router.add_get('/sync/metrics', self.handle_metrics)
+
+        # Catch-all for undefined routes
         self.app.router.add_route('*', '/{path:.*}', self.handle_not_found)
 
     def setup_middleware(self):
-        """Setup middleware for request processing."""
+        """Setup middleware for request processing"""
 
         @web.middleware
         async def security_middleware(request, handler):
+            """Security checks for all requests"""
+
+            # Log request
             client_ip = self.get_client_ip(request)
             logger.info(f"Request from {client_ip}: {request.method} {request.path}")
 
+            # Skip IP check for health endpoint
             if request.path == '/sync/health':
                 return await handler(request)
 
+            # Check if IP is allowed
             if not self.is_ip_allowed(client_ip):
                 logger.warning(f"Blocked request from unauthorized IP: {client_ip}")
                 await self.notify_security_event(f"Blocked unauthorized IP: {client_ip}")
-                return web.json_response({'error': 'Forbidden'}, status=403)
+                return web.json_response(
+                    {'error': 'Forbidden'},
+                    status=403
+                )
 
+            # Check rate limit
             if not self.rate_limiter.is_allowed(client_ip):
                 logger.warning(f"Rate limit exceeded for IP: {client_ip}")
                 await self.notify_security_event(f"Rate limit exceeded: {client_ip}")
-                return web.json_response({'error': 'Too Many Requests'}, status=429)
+                return web.json_response(
+                    {'error': 'Too Many Requests'},
+                    status=429
+                )
 
+            # Process request
             try:
                 response = await handler(request)
                 return response
             except Exception as e:
                 logger.error(f"Error processing request: {e}", exc_info=True)
                 self.error_count += 1
-                return web.json_response({'error': 'Internal Server Error'}, status=500)
+                return web.json_response(
+                    {'error': 'Internal Server Error'},
+                    status=500
+                )
 
         self.app.middlewares.append(security_middleware)
 
     def get_client_ip(self, request: web.Request) -> str:
-        """Get real client IP from request."""
+        """Get real client IP from request"""
+        # Check for proxy headers
         if 'X-Forwarded-For' in request.headers:
             return request.headers['X-Forwarded-For'].split(',')[0].strip()
         if 'X-Real-IP' in request.headers:
             return request.headers['X-Real-IP']
         return request.remote or '127.0.0.1'
 
-    def is_ip_allowed(self, ip: str) -> bool:
-        """Check if IP is allowed."""
-        if ip in self.ALLOWED_SPECIFIC_IPS:
-            return True
-        if ip in ['127.0.0.1', '::1', 'localhost']:
+    def is_ip_allowed(self, client_ip: str) -> bool:
+        """Check if client IP is allowed"""
+        # Allow localhost for testing
+        if client_ip in ['127.0.0.1', '::1', 'localhost']:
             return True
 
+        # Check specific allowed IPs
+        if client_ip in self.ALLOWED_SPECIFIC_IPS:
+            return True
+
+        # Check IP ranges
         try:
-            client_ip = ipaddress.ip_address(ip)
+            client_ip_obj = ipaddress.ip_address(client_ip)
             for ip_range in self.ALLOWED_IP_RANGES:
-                if client_ip in ipaddress.ip_network(ip_range, strict=False):
+                if client_ip_obj in ipaddress.ip_network(ip_range, strict=False):
                     return True
         except ValueError:
-            logger.warning(f"Invalid IP address format: {ip}")
+            logger.warning(f"Invalid IP address format: {client_ip}")
+            return False
 
         return False
 
-    def verify_signature(self, data: Dict, signature: str) -> bool:
-        """Verify request signature."""
+    def verify_signature(self, data_dict: Dict, signature: str) -> bool:
+        """
+        Проверка подписи запроса
+        ИСПРАВЛЕНО: Теперь проверяет подпись от данных БЕЗ самой подписи
+        Совместимо с алгоритмом code.gs
+        """
         if not signature:
+            logger.warning("No signature provided in request")
             return False
 
-        payload = f"{data.get('table', '')}{data.get('timestamp', '')}{data.get('nonce', '')}"
-        expected_signature = hmac.new(
-            self.secret_key.encode(),
-            payload.encode(),
+        # Создаем копию данных без подписи
+        data_for_verification = data_dict.copy()
+        data_for_verification.pop('signature', None)
+
+        # Сортируем ключи для консистентности (как в code.gs)
+        payload_json = json.dumps(data_for_verification, sort_keys=True, separators=(',', ':'))
+
+        # Генерируем ожидаемую подпись
+        expected = hmac.new(
+            self.secret_key.encode('utf-8'),
+            payload_json.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
 
-        return hmac.compare_digest(expected_signature, signature)
+        # Use constant-time comparison
+        is_valid = hmac.compare_digest(expected, signature)
+
+        if not is_valid:
+            logger.warning(f"Invalid signature. Expected: {expected[:10]}..., Got: {signature[:10]}...")
+            logger.debug(f"Payload for verification: {payload_json[:100]}...")
+
+        return is_valid
 
     async def notify_security_event(self, message: str):
-        """Send notification about security event."""
+        """Send notification about security events to admins"""
         try:
             admin_ids = Config.get(Config.ADMIN_USER_IDS, [])
             if not admin_ids:
@@ -218,7 +275,7 @@ class WebhookHandler:
 
             session = get_session()
             try:
-                for admin_id in admin_ids[:3]:
+                for admin_id in admin_ids[:3]:  # Notify first 3 admins
                     notification = Notification(
                         userID=admin_id,
                         notificationType='security',
@@ -233,11 +290,12 @@ class WebhookHandler:
             logger.error(f"Failed to create security notification: {e}")
 
     async def handle_not_found(self, request: web.Request) -> web.Response:
-        """Handle undefined routes."""
+        """Handle undefined routes"""
         return web.json_response({'error': 'Not Found'}, status=404)
 
     async def handle_health(self, request: web.Request) -> web.Response:
-        """Health check endpoint."""
+        """Проверка работоспособности webhook"""
+        # Check health token if configured
         token = request.headers.get('X-Health-Token')
         if self.health_token and token != self.health_token:
             return web.json_response({'status': 'ok'})
@@ -249,7 +307,7 @@ class WebhookHandler:
         })
 
     async def handle_metrics(self, request: web.Request) -> web.Response:
-        """Metrics endpoint."""
+        """Get service metrics"""
         return web.json_response({
             'requests_total': self.request_count,
             'errors_total': self.error_count,
@@ -258,25 +316,31 @@ class WebhookHandler:
         })
 
     async def handle_export(self, request: web.Request) -> web.Response:
-        """Handle export request."""
+        """
+        Обработка запроса на экспорт данных с улучшенной безопасностью
+        """
+        # Update metrics
         self.request_count += 1
         self.last_request_time = datetime.now()
         client_ip = self.get_client_ip(request)
 
         try:
+            # Read request body
             body = await request.read()
 
-            if len(body) > 1024 * 100:
+            # Size limit check
+            if len(body) > 1024 * 100:  # 100KB limit
                 logger.warning(f"Request body too large from {client_ip}: {len(body)} bytes")
                 return web.json_response({'error': 'Request too large'}, status=413)
 
+            # Parse JSON
             try:
                 data = json.loads(body)
             except json.JSONDecodeError as e:
                 logger.warning(f"Invalid JSON from {client_ip}: {e}")
                 return web.json_response({'error': 'Invalid JSON'}, status=400)
 
-            # Check timestamp
+            # Check timestamp (prevent replay attacks)
             if 'timestamp' in data:
                 try:
                     timestamp_str = data['timestamp']
@@ -292,7 +356,7 @@ class WebhookHandler:
                     current_time = datetime.now(timezone.utc)
                     time_diff = abs((current_time - request_time).total_seconds())
 
-                    if time_diff > 300:
+                    if time_diff > 300:  # 5 minutes tolerance
                         logger.warning(f"Request timestamp too old from {client_ip}: {time_diff} seconds")
                         return web.json_response({'error': 'Request expired'}, status=400)
                 except (ValueError, TypeError) as e:
@@ -345,7 +409,6 @@ class WebhookHandler:
             return web.json_response({'error': 'Internal server error'}, status=500)
 
     async def start(self, host: str = '127.0.0.1', port: int = 8080):
-        """Start webhook server."""
         self.start_time = datetime.now()
 
         webhook_host = Config.get('WEBHOOK_HOST')
