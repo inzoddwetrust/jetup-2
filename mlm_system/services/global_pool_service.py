@@ -1,6 +1,9 @@
-# bot/mlm_system/services/global_pool_service.py
+# mlm_system/services/global_pool_service.py
 """
 Global Pool management service for MLM system.
+
+CHANGELOG:
+- ✅ Added DEFAULT_REFERRER protection to avoid O(n²) operations
 """
 from decimal import Decimal
 from typing import List, Dict
@@ -8,7 +11,7 @@ from sqlalchemy.orm import Session
 import logging
 import json
 
-from models import User, GlobalPool, Bonus, MonthlyStats, PassiveBalance
+from models import User, GlobalPool, Bonus, MonthlyStats
 from mlm_system.config.ranks import GLOBAL_POOL_PERCENTAGE
 from mlm_system.utils.time_machine import timeMachine
 from mlm_system.services.volume_service import VolumeService
@@ -91,7 +94,10 @@ class GlobalPoolService:
 
     async def _calculateCompanyMonthlyVolume(self) -> Decimal:
         """Calculate total company volume for current month."""
+        from config import Config
+
         currentMonth = timeMachine.currentMonth
+        default_referrer_id = Config.get(Config.DEFAULT_REFERRER_ID)
 
         # Get all users' monthly PV
         totalVolume = Decimal("0")
@@ -100,6 +106,10 @@ class GlobalPoolService:
         ).all()
 
         for user in users:
+            # Skip root user - their volume is system volume, not real investment
+            if user.telegramID == default_referrer_id:
+                continue
+
             if user.mlmVolumes:
                 monthlyPV = Decimal(user.mlmVolumes.get("monthlyPV", "0"))
                 totalVolume += monthlyPV
@@ -111,7 +121,10 @@ class GlobalPoolService:
         Find users qualified for Global Pool.
         Requirement: 2 Directors in different direct branches.
         """
+        from config import Config
+
         qualifiedUsers = []
+        default_referrer_id = Config.get(Config.DEFAULT_REFERRER_ID)
 
         # Get all potential qualifiers (could be Directors themselves)
         allUsers = self.session.query(User).filter(
@@ -119,6 +132,11 @@ class GlobalPoolService:
         ).all()
 
         for user in allUsers:
+            # Skip root user - not subject to qualification checks
+            # Also avoids expensive getBestBranches() call for user with ALL downline
+            if user.telegramID == default_referrer_id:
+                continue
+
             # Check if user has 2 directors in different branches
             if await self._checkGlobalPoolQualification(user):
                 qualifiedUsers.append({
@@ -134,6 +152,12 @@ class GlobalPoolService:
         Check if user qualifies for Global Pool.
         Need 2 Directors in top 2 branches.
         """
+        from config import Config
+
+        # Skip root user - would trigger expensive operations on entire user tree
+        if user.telegramID == Config.get(Config.DEFAULT_REFERRER_ID):
+            return False
+
         # Get top 2 branches
         branches = await self.volumeService.getBestBranches(user.userID, 2)
 
@@ -331,12 +355,21 @@ class GlobalPoolService:
 
     async def checkUserQualification(self, userId: int) -> Dict:
         """Check if specific user qualifies for Global Pool."""
+        from config import Config
+
         user = self.session.query(User).filter_by(userID=userId).first()
 
         if not user:
             return {
                 "qualified": False,
                 "reason": "User not found"
+            }
+
+        # Root user doesn't qualify
+        if user.telegramID == Config.get(Config.DEFAULT_REFERRER_ID):
+            return {
+                "qualified": False,
+                "reason": "System user"
             }
 
         if not user.isActive:

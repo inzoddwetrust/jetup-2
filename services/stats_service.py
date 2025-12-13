@@ -200,17 +200,34 @@ class StatsService:
     # PRIVATE HELPER METHODS
     # ═══════════════════════════════════════════════════════════════════════
 
-    def _count_all_referrals_recursive(self, session, telegram_id: int) -> int:
+    def _count_all_referrals_recursive(self, session, telegram_id: int, visited: set = None) -> int:
         """
         Recursively count all downline referrals.
 
         Args:
             session: Database session
             telegram_id: User's Telegram ID
+            visited: Set of already visited IDs (cycle protection)
 
         Returns:
             Total count of all levels
         """
+        from config import Config
+
+        # Skip for root user - would cause infinite recursion (all users are his referrals)
+        if telegram_id == Config.get(Config.DEFAULT_REFERRER_ID):
+            return 0
+
+        # Initialize visited set on first call
+        if visited is None:
+            visited = set()
+
+        # Cycle protection
+        if telegram_id in visited:
+            logger.warning(f"Cycle detected in referral chain at {telegram_id}")
+            return 0
+
+        visited.add(telegram_id)
         count = 0
 
         # Get direct referrals
@@ -220,21 +237,38 @@ class StatsService:
 
         for (ref_id,) in direct_refs:
             count += 1  # Count this referral
-            count += self._count_all_referrals_recursive(session, ref_id)  # Count their downline
+            count += self._count_all_referrals_recursive(session, ref_id, visited)
 
         return count
 
-    def _get_all_downline_ids(self, session, telegram_id: int) -> List[int]:
+    def _get_all_downline_ids(self, session, telegram_id: int, visited: set = None) -> List[int]:
         """
         Get all downline user IDs recursively.
 
         Args:
             session: Database session
             telegram_id: User's Telegram ID
+            visited: Set of already visited IDs (cycle protection)
 
         Returns:
             List of user IDs (internal IDs, not telegram IDs)
         """
+        from config import Config
+
+        # Skip for root user - would return ALL users in system
+        if telegram_id == Config.get(Config.DEFAULT_REFERRER_ID):
+            return []
+
+        # Initialize visited set on first call
+        if visited is None:
+            visited = set()
+
+        # Cycle protection
+        if telegram_id in visited:
+            logger.warning(f"Cycle detected in referral chain at {telegram_id}")
+            return []
+
+        visited.add(telegram_id)
         result = []
 
         # Get direct referrals
@@ -245,7 +279,7 @@ class StatsService:
         for user_id, ref_telegram_id in direct_refs:
             result.append(user_id)
             # Recursively get their downline
-            result.extend(self._get_all_downline_ids(session, ref_telegram_id))
+            result.extend(self._get_all_downline_ids(session, ref_telegram_id, visited))
 
         return result
 

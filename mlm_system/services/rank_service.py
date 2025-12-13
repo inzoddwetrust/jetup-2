@@ -1,3 +1,4 @@
+# mlm_system/services/rank_service.py
 """
 Rank management service for MLM system.
 
@@ -6,6 +7,7 @@ CHANGELOG:
 - ✅ Fixed RANK_CONFIG usage (added () to call function)
 - ✅ Fixed _countActivePartners() to count entire structure (uses ChainWalker)
 - ✅ Use totalVolume.qualifyingVolume for TV (with 50% rule)
+- ✅ Added DEFAULT_REFERRER protection to avoid O(n²) operations
 """
 from decimal import Decimal
 from typing import Optional, Dict
@@ -147,6 +149,12 @@ class RankService:
         Returns:
             Count of active users in entire downline
         """
+        from config import Config
+
+        # Skip for root user - would count ALL users in system (O(n) operation)
+        if user.telegramID == Config.get(Config.DEFAULT_REFERRER_ID):
+            return 0
+
         from mlm_system.utils.chain_walker import ChainWalker
 
         walker = ChainWalker(self.session)
@@ -163,6 +171,12 @@ class RankService:
         Returns:
             Total count of users in downline
         """
+        from config import Config
+
+        # Skip for root user - would count ALL users in system (O(n) operation)
+        if user.telegramID == Config.get(Config.DEFAULT_REFERRER_ID):
+            return 0
+
         from mlm_system.utils.chain_walker import ChainWalker
 
         walker = ChainWalker(self.session)
@@ -249,34 +263,41 @@ class RankService:
 
         Returns:
             True if rank assigned successfully
-            False if:
-            - Founder not found
-            - Founder doesn't have isFounder status
-            - User not found
         """
-        # Check if assigner is a founder
+        # Verify founder status
         founder = self.session.query(User).filter_by(userID=founderId).first()
         if not founder:
             logger.error(f"Founder {founderId} not found")
             return False
 
-        if not founder.mlmStatus or not founder.mlmStatus.get("isFounder", False):
-            logger.error(
-                f"User {founderId} is not a founder, cannot assign ranks"
-            )
+        if not founder.isFounder:
+            logger.error(f"User {founderId} is not a founder")
             return False
 
         # Get target user
         user = self.session.query(User).filter_by(userID=userId).first()
         if not user:
-            logger.error(f"User {userId} not found")
+            logger.error(f"Target user {userId} not found")
             return False
 
-        oldRank = user.rank
+        oldRank = user.rank or "start"
 
-        # Assign rank
+        # Update rank (founders can assign any rank)
         user.rank = newRank
 
+        # Record in history with founder reference
+        history = RankHistory(
+            userID=userId,
+            previousRank=oldRank,
+            newRank=newRank,
+            qualificationMethod="assigned",
+            teamVolume=user.teamVolumeTotal,
+            activePartners=await self._countActivePartners(user),
+            assignedBy=founderId
+        )
+        self.session.add(history)
+
+        # Update mlmStatus
         if not user.mlmStatus:
             user.mlmStatus = {}
         user.mlmStatus["assignedRank"] = newRank
@@ -284,19 +305,6 @@ class RankService:
         user.mlmStatus["assignedAt"] = timeMachine.now.isoformat()
 
         flag_modified(user, 'mlmStatus')
-
-        # Record in history
-        history = RankHistory(
-            userID=userId,
-            previousRank=oldRank,  # ✅ FIXED: was oldRank=
-            newRank=newRank,
-            qualificationMethod="assigned",
-            assignedBy=founderId,
-            teamVolume=user.teamVolumeTotal,
-            activePartners=await self._countActivePartners(user),
-            notes=f"Assigned by founder {founderId}"
-        )
-        self.session.add(history)
 
         self.session.commit()
 
@@ -392,18 +400,29 @@ class RankService:
             Statistics dict with:
             - checked: Number of users checked
             - updated: Number of users with rank updated
+            - skipped: Number of users skipped (e.g., root user)
             - errors: Number of errors encountered
         """
+        from config import Config
+
         results = {
             "checked": 0,
             "updated": 0,
+            "skipped": 0,
             "errors": 0
         }
 
+        default_referrer_id = Config.get(Config.DEFAULT_REFERRER_ID)
         users = self.session.query(User).all()
 
         for user in users:
             try:
+                # Skip root user - has special status, not subject to rank checks
+                # Also avoids O(n²) complexity from walking entire user tree
+                if user.telegramID == default_referrer_id:
+                    results["skipped"] += 1
+                    continue
+
                 results["checked"] += 1
 
                 # Check for new rank qualification
@@ -426,7 +445,8 @@ class RankService:
 
         logger.info(
             f"Rank check complete: checked={results['checked']}, "
-            f"updated={results['updated']}, errors={results['errors']}"
+            f"updated={results['updated']}, skipped={results['skipped']}, "
+            f"errors={results['errors']}"
         )
 
         return results
@@ -478,10 +498,17 @@ class RankService:
             userId: User ID
 
         Returns:
-            True if stats saved, False if already exist for current month
+            True if stats saved, False if already exist or skipped
         """
+        from config import Config
+
         user = self.session.query(User).filter_by(userID=userId).first()
         if not user:
+            return False
+
+        # Skip stats for root user - not meaningful and avoids O(n) operations
+        if user.telegramID == Config.get(Config.DEFAULT_REFERRER_ID):
+            logger.debug(f"Skipping monthly stats for root user {userId}")
             return False
 
         currentMonth = timeMachine.currentMonth
