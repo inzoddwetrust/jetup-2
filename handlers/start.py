@@ -307,7 +307,7 @@ async def show_welcome_screen(
 
             # MLM data
             'rank': rank_display,
-            'isActive': '🟢' if user.isActive else '🔴',
+            'isActive': '🟢Active' if user.isActive else '🔴 Inactive',
             'monthlyPV': float(monthly_pv),
             'teamVolumeTotal': float(user.teamVolumeTotal or 0)
         },
