@@ -19,6 +19,7 @@ from models.active_balance import ActiveBalance
 from models.passive_balance import PassiveBalance
 from core.message_manager import MessageManager
 from services.document.csv_generator import CSVGenerator
+from mlm_system.utils.time_machine import timeMachine
 
 logger = logging.getLogger(__name__)
 finances_router = Router(name="finances_router")
@@ -201,19 +202,62 @@ async def handle_finances(
         Bonus.status == 'paid'
     ).scalar() or Decimal('0')
 
+    # ═══════════════════════════════════════════════════════════════
+    # Pending bonuses breakdown by period
+    # ═══════════════════════════════════════════════════════════════
+    first_of_month = timeMachine.now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    pending_types = ["differential", "global_pool", "system_compression"]
+
+    # 1. Ready to pay (created BEFORE current month) - will be paid on 5th of THIS month
+    ready_to_pay = session.query(
+        Bonus.commissionType,
+        func.sum(Bonus.bonusAmount)
+    ).filter(
+        Bonus.userID == user.userID,
+        Bonus.status == 'pending',
+        Bonus.commissionType.in_(pending_types),
+        Bonus.createdAt < first_of_month
+    ).group_by(Bonus.commissionType).all()
+
+    ready_by_type = {row[0]: row[1] or Decimal('0') for row in ready_to_pay}
+
+    # 2. Accumulated this month - will be paid on 5th of NEXT month
+    accumulated = session.query(
+        Bonus.commissionType,
+        func.sum(Bonus.bonusAmount)
+    ).filter(
+        Bonus.userID == user.userID,
+        Bonus.status == 'pending',
+        Bonus.commissionType.in_(pending_types),
+        Bonus.createdAt >= first_of_month
+    ).group_by(Bonus.commissionType).all()
+
+    accumulated_by_type = {row[0]: row[1] or Decimal('0') for row in accumulated}
+
     await message_manager.send_template(
         user=user,
         template_key='/finances',
         update=callback_query,
         variables={
-            'balanceActive': float(user.balanceActive),
-            'balancePassive': float(user.balancePassive),
+            'balanceActive': float(user.balanceActive or 0),
+            'balancePassive': float(user.balancePassive or 0),
             'firstname': user.firstname,
             'userid': user.userID,
             'surname': user.surname or '',
             'userPurchasesTotal': float(user_purchases_total),
             'userPaymentsTotal': float(user_payments_total),
-            'userBonusesTotal': float(user_bonuses_total)
+            'userBonusesTotal': float(user_bonuses_total),
+            # Ready to pay on 5th of this month
+            'readyDifferential': float(ready_by_type.get('differential', 0)),
+            'readyGlobalPool': float(ready_by_type.get('global_pool', 0)),
+            'readySystemCompression': float(ready_by_type.get('system_compression', 0)),
+            'readyTotal': float(sum(ready_by_type.values())),
+            # Accumulated this month (pay on 5th of next month)
+            'accumulatedDifferential': float(accumulated_by_type.get('differential', 0)),
+            'accumulatedGlobalPool': float(accumulated_by_type.get('global_pool', 0)),
+            'accumulatedSystemCompression': float(accumulated_by_type.get('system_compression', 0)),
+            'accumulatedTotal': float(sum(accumulated_by_type.values()))
         },
         delete_original=True
     )
