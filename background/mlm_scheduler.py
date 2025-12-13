@@ -370,6 +370,7 @@ class MLMScheduler:
                 # Calculate Global Pool
                 globalPoolService = GlobalPoolService(session)
                 await globalPoolService.calculateMonthlyPool()
+                await globalPoolService.distributeGlobalPool()
 
                 # Save monthly statistics
                 await self.saveMonthlyStats(session)
