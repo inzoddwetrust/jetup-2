@@ -286,6 +286,7 @@ async def show_welcome_screen(
         update=message_or_callback,
         variables={
             # User info
+            'userID': user.userID,
             'firstname': user.firstname or 'User',
             'language': user.lang or 'en',
             'email': user.email or '',
