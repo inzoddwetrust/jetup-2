@@ -474,11 +474,14 @@ class MLMScheduler:
         Called on 5th of each month.
 
         This method:
-        1. Finds all pending bonuses (differential + global_pool)
+        1. Finds all pending bonuses (differential + global_pool) created BEFORE current month
         2. Creates PassiveBalance transactions
         3. Updates user.balancePassive
         4. Changes bonus status to "paid"
         5. Creates notifications for users
+
+        IMPORTANT: Only bonuses created before the 1st of current month are paid.
+        Bonuses created in current month (1st-4th) will be paid on 5th of NEXT month.
 
         Transaction flow (double-entry bookkeeping):
         - Bonus record: tracking/audit
@@ -490,11 +493,31 @@ class MLMScheduler:
 
         logger.info("Processing monthly payments (differential + global_pool)")
 
+        # ═══════════════════════════════════════════════════════════════
+        # FIX: Only pay bonuses created BEFORE current month
+        # Bonuses created this month (1st-4th) wait until next month's 5th
+        # ═══════════════════════════════════════════════════════════════
+        first_of_month = timeMachine.now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
         # Find pending bonuses that should be paid on 5th
         pendingBonuses = session.query(Bonus).filter(
             Bonus.status == "pending",
-            Bonus.commissionType.in_(["differential", "global_pool", "system_compression"])
+            Bonus.commissionType.in_(["differential", "global_pool", "system_compression"]),
+            Bonus.createdAt < first_of_month  # Only bonuses from previous months
         ).all()
+
+        # Log for debugging - count bonuses that will wait until next month
+        skipped_bonuses = session.query(Bonus).filter(
+            Bonus.status == "pending",
+            Bonus.commissionType.in_(["differential", "global_pool", "system_compression"]),
+            Bonus.createdAt >= first_of_month  # Bonuses from current month
+        ).count()
+
+        if skipped_bonuses > 0:
+            logger.info(
+                f"Skipping {skipped_bonuses} bonuses created this month "
+                f"(will be paid on 5th of next month)"
+            )
 
         if not pendingBonuses:
             logger.info("No pending bonuses to process")

@@ -3,15 +3,15 @@
 GlobalPool model - global pool calculations and distributions.
 """
 from sqlalchemy import Column, Integer, String, DECIMAL, DateTime, Text
-from datetime import datetime, timezone
-from models.base import Base
+
+from models.base import Base, _get_current_time
 
 
 class GlobalPool(Base):
     __tablename__ = 'global_pool'
 
     poolID = Column(Integer, primary_key=True, autoincrement=True)
-    createdAt = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    createdAt = Column(DateTime, default=_get_current_time)
 
     # Period
     month = Column(String, nullable=False)  # "2024-01" format

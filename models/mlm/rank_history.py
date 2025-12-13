@@ -4,15 +4,15 @@ RankHistory model - tracks rank achievements and changes.
 """
 from sqlalchemy import Column, Integer, String, DECIMAL, DateTime, Text, ForeignKey
 from sqlalchemy.orm import relationship
-from datetime import datetime, timezone
-from models.base import Base
+
+from models.base import Base, _get_current_time
 
 
 class RankHistory(Base):
     __tablename__ = 'rank_history'
 
     historyID = Column(Integer, primary_key=True, autoincrement=True)
-    createdAt = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    createdAt = Column(DateTime, default=_get_current_time)
 
     # Relations
     userID = Column(Integer, ForeignKey('users.userID'), nullable=False)

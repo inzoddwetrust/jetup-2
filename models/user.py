@@ -4,8 +4,9 @@ User model - central entity for the system.
 """
 from sqlalchemy import Column, Integer, BigInteger, String, DECIMAL, Boolean, DateTime, Text, JSON
 from datetime import datetime, timezone
-from models.base import Base
 from decimal import Decimal
+
+from models.base import Base, _get_current_time
 
 
 class User(Base):
@@ -15,7 +16,7 @@ class User(Base):
     userID = Column(Integer, primary_key=True, autoincrement=True)
     telegramID = Column(BigInteger, unique=True, nullable=False)
     upline = Column(BigInteger, nullable=True)
-    createdAt = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    createdAt = Column(DateTime, default=_get_current_time)
 
     email = Column(String, nullable=True)
     firstname = Column(String, nullable=True)

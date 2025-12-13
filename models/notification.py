@@ -1,14 +1,13 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
-from datetime import datetime, timezone
-from models.base import Base
+from models.base import Base, _get_current_time
 
 
 class Notification(Base):
     __tablename__ = 'notifications'
 
     notificationID = Column(Integer, primary_key=True, autoincrement=True)
-    createdAt = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    createdAt = Column(DateTime, default=_get_current_time)
 
     source = Column(String, nullable=False)
     text = Column(Text, nullable=False)
