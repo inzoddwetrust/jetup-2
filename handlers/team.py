@@ -13,9 +13,7 @@ from sqlalchemy.orm import Session
 
 from services.document.csv_generator import CSVGenerator
 from models.user import User
-from models.purchase import Purchase
 from core.message_manager import MessageManager
-from core.utils import safe_delete_message
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -273,7 +271,7 @@ async def show_marketing_info(
 
 
 # ============================================================================
-# TEAM STATISTICS
+# TEAM STRUCTURE (was TEAM STATISTICS)
 # ============================================================================
 
 @team_router.callback_query(F.data == "/team/stats")
@@ -283,62 +281,155 @@ async def handle_team_stats(
         session: Session,
         message_manager: MessageManager
 ):
-    """Show team statistics: referrals and their purchases."""
-    logger.info(f"User {user.userID} viewing team stats")
+    """Show team structure: branch tree with volumes."""
+    from mlm_system.utils.chain_walker import ChainWalker
+    from mlm_system.config.ranks import RANK_CONFIG, Rank
 
-    # Calculate team statistics
-    # Direct referrals count
-    direct_refs = session.query(func.count(User.userID)).filter(
-        User.upline == user.telegramID
-    ).scalar() or 0
+    logger.info(f"User {user.userID} viewing team structure")
 
-    # Get direct referrals with purchases
-    referrals_with_purchases = session.query(
-        User.userID,
-        User.firstname,
-        User.surname,
-        User.createdAt,
-        func.sum(Purchase.packPrice).label('total_purchases'),
-        func.count(Purchase.purchaseID).label('purchases_count')
-    ).outerjoin(
-        Purchase, Purchase.userID == User.userID
-    ).filter(
-        User.upline == user.telegramID
-    ).group_by(
-        User.userID, User.firstname, User.surname, User.createdAt
-    ).all()
+    # =========================================================================
+    # RANK EMOJI MAP
+    # =========================================================================
+    rank_emoji_map = {
+        "start": "🔷",
+        "builder": "🔶",
+        "growth": "💎",
+        "leadership": "⭐️",
+        "director": "👑"
+    }
 
-    # Team total purchases
-    team_total = Decimal("0")
-    for ref in referrals_with_purchases:
-        if ref.total_purchases:
-            team_total += Decimal(str(ref.total_purchases))
+    # =========================================================================
+    # GET BRANCHES DATA
+    # =========================================================================
+    branches_tree = []
+    cap_limit = 0
+    capped_count = 0
 
-    # Format data for template
-    stats_data = []
-    for ref in referrals_with_purchases:
-        stats_data.append({
-            'name': f"{ref.firstname} {ref.surname or ''}".strip() or "User",
-            'joined': ref.createdAt.strftime("%Y-%m-%d") if ref.createdAt else "N/A",
-            'purchases': int(ref.purchases_count or 0),
-            'volume': f"${float(ref.total_purchases or 0):,.0f}"
-        })
+    # Try to get from totalVolume JSON first (pre-calculated)
+    if user.totalVolume and isinstance(user.totalVolume, dict):
+        branches = user.totalVolume.get("branches", [])
+        cap_limit = user.totalVolume.get("capLimit", 0)
 
-    # Sort by volume
-    stats_data.sort(key=lambda x: float(x['volume'].replace('$', '').replace(',', '')), reverse=True)
+        # Sort by fullVolume descending, take top 5
+        branches_sorted = sorted(branches, key=lambda b: b.get("fullVolume", 0), reverse=True)[:5]
 
+        for branch in branches_sorted:
+            ref_user_id = branch.get("referralUserId")
+            ref_user = session.query(User).filter_by(userID=ref_user_id).first() if ref_user_id else None
+
+            # Get name (max 15 chars)
+            ref_name = branch.get("referralName", "User")
+            # Extract just firstname from "Firstname (ID)" format
+            if " (" in ref_name:
+                ref_name = ref_name.split(" (")[0]
+            if len(ref_name) > 15:
+                ref_name = ref_name[:12] + "..."
+
+            # Get rank
+            ref_rank = ref_user.rank if ref_user else "start"
+            ref_rank_emoji = rank_emoji_map.get(ref_rank, "🔷")
+
+            # Get volumes
+            full_volume = branch.get("fullVolume", 0)
+            capped_volume = branch.get("cappedVolume", full_volume)
+            is_capped = branch.get("isCapped", False)
+
+            if is_capped:
+                capped_count += 1
+
+            # Get team size using ChainWalker
+            team_size = 0
+            if ref_user:
+                walker = ChainWalker(session)
+                team_size = walker.count_downline(ref_user)
+
+            branches_tree.append({
+                "name": ref_name,
+                "user_id": ref_user_id or 0,
+                "rank_emoji": ref_rank_emoji,
+                "full_volume": full_volume,
+                "capped_volume": capped_volume,
+                "is_capped": is_capped,
+                "team_size": team_size
+            })
+    else:
+        # Fallback: get direct referrals from DB
+        direct_referrals = session.query(User).filter(
+            User.upline == user.telegramID
+        ).order_by(User.personalVolumeTotal.desc()).limit(5).all()
+
+        walker = ChainWalker(session)
+
+        for ref in direct_referrals:
+            # Get name (max 15 chars)
+            ref_name = ref.firstname or "User"
+            if len(ref_name) > 15:
+                ref_name = ref_name[:12] + "..."
+
+            ref_rank_emoji = rank_emoji_map.get(ref.rank or "start", "🔷")
+            ref_volume = float(ref.fullVolume or ref.personalVolumeTotal or 0)
+            team_size = walker.count_downline(ref)
+
+            branches_tree.append({
+                "name": ref_name,
+                "user_id": ref.userID,
+                "rank_emoji": ref_rank_emoji,
+                "full_volume": ref_volume,
+                "capped_volume": ref_volume,
+                "is_capped": False,
+                "team_size": team_size
+            })
+
+    # =========================================================================
+    # BUILD TREE TEXT
+    # =========================================================================
+    tree_lines = []
+
+    for i, branch in enumerate(branches_tree):
+        is_last = (i == len(branches_tree) - 1)
+        prefix = "└─" if is_last else "├─"
+        indent = "   " if is_last else "│  "
+
+        # Name line with rank emoji
+        name_line = f"{prefix} 👤 {branch['name']} ({branch['user_id']}) {branch['rank_emoji']}"
+        tree_lines.append(name_line)
+
+        # Volume line
+        if branch['is_capped']:
+            volume_line = f"{indent} └─ TV: ${branch['full_volume']:,.0f} → ${branch['capped_volume']:,.0f} ⚠️"
+        else:
+            volume_line = f"{indent} └─ TV: ${branch['full_volume']:,.0f} ✅"
+        tree_lines.append(volume_line)
+
+        # Team size line
+        team_line = f"{indent} └─ Команда: {branch['team_size']} чел."
+        tree_lines.append(team_line)
+
+        # Empty line between branches (except last)
+        if not is_last:
+            tree_lines.append("│")
+
+    tree_text = "\n".join(tree_lines) if tree_lines else "Нет рефералов"
+
+    # =========================================================================
+    # 50% RULE INFO
+    # =========================================================================
+    rule_50_text = ""
+    if cap_limit > 0:
+        rule_50_text = f"💡 Правило 50%: Лимит на ветку: ${cap_limit:,.0f}"
+        if capped_count > 0:
+            rule_50_text += f"\n⚠️ {capped_count} ветка достигла лимита"
+
+    # =========================================================================
+    # SEND TEMPLATE
+    # =========================================================================
     await message_manager.send_template(
         user=user,
         template_key='/team/stats',
         variables={
-            'direct_refs': direct_refs,
-            'team_total': f"${float(team_total):,.0f}",
-            'rgroup': {
-                'name': [s['name'] for s in stats_data],
-                'joined': [s['joined'] for s in stats_data],
-                'purchases': [s['purchases'] for s in stats_data],
-                'volume': [s['volume'] for s in stats_data]
-            } if stats_data else None
+            'tree_text': tree_text,
+            'rule_50_text': rule_50_text,
+            'branches_count': len(branches_tree)
         },
         update=callback_query,
         delete_original=True
