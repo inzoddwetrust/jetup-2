@@ -34,27 +34,162 @@ async def handle_team(
         session: Session,
         message_manager: MessageManager
 ):
-    """Show main team screen with referral counts."""
+    """Show main team screen with full MLM metrics."""
     from mlm_system.utils.chain_walker import ChainWalker
+    from mlm_system.config.ranks import RANK_CONFIG, Rank
 
     logger.info(f"User {user.userID} opened team screen")
 
+    # =========================================================================
+    # RANK DATA
+    # =========================================================================
+    rank_emoji_map = {
+        "start": "🔷",
+        "builder": "🔶",
+        "growth": "💎",
+        "leadership": "⭐️",
+        "director": "👑"
+    }
+
+    current_rank = user.rank or "start"
+    rank_emoji = rank_emoji_map.get(current_rank, "🔷")
+
+    # Get rank display name from config
+    try:
+        rank_enum = Rank(current_rank)
+        rank_config = RANK_CONFIG()
+        rank_display = rank_config[rank_enum].get("displayName", current_rank.title())
+    except (ValueError, KeyError):
+        rank_display = current_rank.title()
+
+    # =========================================================================
+    # PIONEER STATUS
+    # =========================================================================
+    pioneer_text = ""
+    if user.mlmStatus and user.mlmStatus.get("hasPioneerBonus", False):
+        # Get global pioneer count from root user
+        default_referrer_id = Config.get(Config.DEFAULT_REFERRER_ID)
+        root_user = session.query(User).filter_by(telegramID=default_referrer_id).first()
+
+        pioneer_number = "?"
+        if root_user and root_user.mlmStatus:
+            pioneer_number = root_user.mlmStatus.get("pioneerPurchasesCount", "?")
+
+        pioneer_text = f"🎖 Pioneer #{pioneer_number}/50 (+4%)"
+
+    # =========================================================================
+    # SALES DATA
+    # =========================================================================
+    personal_volume = float(user.personalVolumeTotal or Decimal("0"))
+    team_volume_full = float(user.fullVolume or Decimal("0"))
+
+    # =========================================================================
+    # QUALIFICATION TO NEXT RANK
+    # =========================================================================
+    qualifying_volume = 0
+    required_volume = 0
+    next_rank_name = ""
+    progress_percent = 0
+    progress_bar = "░░░░░░░░░░"  # 10 blocks = 100%
+    gap_amount = 0
+
+    # Get next rank
+    ranks_order = ["start", "builder", "growth", "leadership", "director"]
+    try:
+        current_idx = ranks_order.index(current_rank)
+        if current_idx < len(ranks_order) - 1:
+            next_rank = ranks_order[current_idx + 1]
+            next_rank_enum = Rank(next_rank)
+            next_rank_data = rank_config.get(next_rank_enum, {})
+
+            next_rank_name = next_rank_data.get("displayName", next_rank.title())
+            required_volume = float(next_rank_data.get("teamVolumeRequired", Decimal("0")))
+
+            # Get qualifying volume from totalVolume JSON
+            if user.totalVolume and isinstance(user.totalVolume, dict):
+                qualifying_volume = float(user.totalVolume.get("qualifyingVolume", 0))
+            else:
+                qualifying_volume = float(user.teamVolumeTotal or Decimal("0"))
+
+            # Calculate progress
+            if required_volume > 0:
+                progress_percent = min(100, int((qualifying_volume / required_volume) * 100))
+                filled_blocks = int(progress_percent / 10)
+                progress_bar = "█" * filled_blocks + "░" * (10 - filled_blocks)
+                gap_amount = max(0, required_volume - qualifying_volume)
+    except (ValueError, KeyError, IndexError):
+        pass
+
+    # =========================================================================
+    # TEAM METRICS
+    # =========================================================================
     # Count direct referrals
-    upline_count = session.query(func.count(User.userID)).filter(
+    direct_referrals = session.query(func.count(User.userID)).filter(
         User.upline == user.telegramID
     ).scalar() or 0
 
     # Count all referrals recursively using ChainWalker
     walker = ChainWalker(session)
-    upline_total = walker.count_downline(user)
+    total_team = walker.count_downline(user)
 
+    # Count active partners (entire structure with isActive=True)
+    active_partners = walker.count_active_downline(user)
+
+    # Get required active partners for next rank
+    required_active_partners = 0
+    if current_idx < len(ranks_order) - 1:
+        required_active_partners = int(next_rank_data.get("activePartnersRequired", 0))
+
+    # =========================================================================
+    # 50% RULE WARNING
+    # =========================================================================
+    rule_50_warning = ""
+    if user.totalVolume and isinstance(user.totalVolume, dict):
+        branches = user.totalVolume.get("branches", [])
+        capped_count = sum(1 for b in branches if b.get("isCapped", False))
+
+        if capped_count > 0:
+            rule_50_warning = f"⚠️ Правило 50%: {capped_count} ветка достигла лимита\n💡 Развивайте другие ветки"
+        elif branches and qualifying_volume > 0:
+            rule_50_warning = "✅ Баланс веток: OK"
+
+    # =========================================================================
+    # SEND TEMPLATE
+    # =========================================================================
     await message_manager.send_template(
         user=user,
         template_key='/team',
         update=callback_query,
         variables={
-            'userInvitedUplineFirst': upline_count,
-            'userInvitedUplineTotal': upline_total
+            # Rank data
+            'rank_emoji': rank_emoji,
+            'rank_display': rank_display,
+            'pioneer_text': pioneer_text,
+
+            # Sales data
+            'personal_volume': f"{personal_volume:,.0f}",
+            'team_volume_full': f"{team_volume_full:,.0f}",
+
+            # Qualification data
+            'next_rank_name': next_rank_name,
+            'qualifying_volume': f"{qualifying_volume:,.0f}",
+            'required_volume': f"{required_volume:,.0f}",
+            'progress_percent': progress_percent,
+            'progress_bar': progress_bar,
+            'gap_amount': f"{gap_amount:,.0f}",
+
+            # Team metrics
+            'direct_referrals': direct_referrals,
+            'total_team': total_team,
+            'active_partners': active_partners,
+            'required_active_partners': required_active_partners,
+
+            # 50% rule
+            'rule_50_warning': rule_50_warning,
+
+            # Legacy variables (for backward compatibility)
+            'userInvitedUplineFirst': direct_referrals,
+            'userInvitedUplineTotal': total_team
         },
         delete_original=True
     )
@@ -151,86 +286,70 @@ async def handle_team_stats(
     """Show team statistics: referrals and their purchases."""
     logger.info(f"User {user.userID} viewing team stats")
 
-    # Delete original message
-    await safe_delete_message(callback_query)
-
-    # Get bot username for referral link
-    bot_username = Config.get(Config.BOT_USERNAME)
-    ref_link = f"https://t.me/{bot_username}?start={user.telegramID}"
-
-    # Calculate current month start
-    now = datetime.utcnow()
-    current_month_start = datetime(now.year, now.month, 1)
-
-    logger.info(f"Calculating stats from {current_month_start}")
-
-    # Get all referrals
-    referrals = session.query(User).filter(
+    # Calculate team statistics
+    # Direct referrals count
+    direct_refs = session.query(func.count(User.userID)).filter(
         User.upline == user.telegramID
+    ).scalar() or 0
+
+    # Get direct referrals with purchases
+    referrals_with_purchases = session.query(
+        User.userID,
+        User.firstname,
+        User.surname,
+        User.createdAt,
+        func.sum(Purchase.packPrice).label('total_purchases'),
+        func.count(Purchase.purchaseID).label('purchases_count')
+    ).outerjoin(
+        Purchase, Purchase.userID == User.userID
+    ).filter(
+        User.upline == user.telegramID
+    ).group_by(
+        User.userID, User.firstname, User.surname, User.createdAt
     ).all()
 
-    # Count referrals
-    total_referrals = len(referrals)
-    new_referrals = len([
-        r for r in referrals
-        if r.createdAt and r.createdAt >= current_month_start
-    ])
+    # Team total purchases
+    team_total = Decimal("0")
+    for ref in referrals_with_purchases:
+        if ref.total_purchases:
+            team_total += Decimal(str(ref.total_purchases))
 
-    # Get referral IDs
-    referral_ids = [r.userID for r in referrals]
+    # Format data for template
+    stats_data = []
+    for ref in referrals_with_purchases:
+        stats_data.append({
+            'name': f"{ref.firstname} {ref.surname or ''}".strip() or "User",
+            'joined': ref.createdAt.strftime("%Y-%m-%d") if ref.createdAt else "N/A",
+            'purchases': int(ref.purchases_count or 0),
+            'volume': f"${float(ref.total_purchases or 0):,.0f}"
+        })
 
-    # Calculate purchases
-    total_purchases = Decimal('0')
-    monthly_purchases = Decimal('0')
+    # Sort by volume
+    stats_data.sort(key=lambda x: float(x['volume'].replace('$', '').replace(',', '')), reverse=True)
 
-    if referral_ids:
-        referral_purchases = session.query(Purchase).filter(
-            Purchase.userID.in_(referral_ids)
-        ).order_by(Purchase.createdAt).all()
-
-        logger.info(f"Found purchases for referrals {referral_ids}:")
-        for purchase in referral_purchases:
-            # Convert to Decimal for precision
-            amount = Decimal(str(purchase.packPrice))
-            total_purchases += amount
-
-            if purchase.createdAt and purchase.createdAt >= current_month_start:
-                monthly_purchases += amount
-                logger.info(
-                    f"Monthly purchase - ID: {purchase.purchaseID}, "
-                    f"User: {purchase.userID}, Date: {purchase.createdAt}, "
-                    f"Amount: {amount}"
-                )
-            else:
-                logger.info(
-                    f"Earlier purchase - ID: {purchase.purchaseID}, "
-                    f"User: {purchase.userID}, Date: {purchase.createdAt}, "
-                    f"Amount: {amount}"
-                )
-
-        logger.info(f"Total purchases sum: {total_purchases}")
-        logger.info(f"Current month purchases sum: {monthly_purchases}")
-
-    # Send stats message
-    # Convert Decimal to float for template
     await message_manager.send_template(
         user=user,
         template_key='/team/stats',
-        update=callback_query,
         variables={
-            'ref_link': ref_link,
-            'total_refs': total_referrals,
-            'new_refs': new_referrals,
-            'total_purchases': float(total_purchases),
-            'monthly_purchases': float(monthly_purchases)
-        }
+            'direct_refs': direct_refs,
+            'team_total': f"${float(team_total):,.0f}",
+            'rgroup': {
+                'name': [s['name'] for s in stats_data],
+                'joined': [s['joined'] for s in stats_data],
+                'purchases': [s['purchases'] for s in stats_data],
+                'volume': [s['volume'] for s in stats_data]
+            } if stats_data else None
+        },
+        update=callback_query,
+        delete_original=True
     )
 
+
 # ============================================================================
-# CSV REPORT DOWNLOAD
+# CSV DOWNLOAD
 # ============================================================================
 
-@team_router.callback_query(F.data.regexp(r"^.*/download/csv/.*$"))
+@team_router.callback_query(F.data.regexp(r"/team/stats/download/csv/.+$"))
 async def handle_csv_download(
         callback_query: CallbackQuery,
         user: User,
