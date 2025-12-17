@@ -13,7 +13,9 @@ from sqlalchemy.orm import Session
 
 from services.document.csv_generator import CSVGenerator
 from models.user import User
+from models.purchase import Purchase
 from core.message_manager import MessageManager
+from core.utils import safe_delete_message
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -49,16 +51,30 @@ async def handle_team(
         "director": "👑"
     }
 
+    # Localized rank names
+    rank_names = {
+        "en": {
+            "start": "Start",
+            "builder": "Builder",
+            "growth": "Growth",
+            "leadership": "Leadership",
+            "director": "Director"
+        },
+        "ru": {
+            "start": "Старт",
+            "builder": "Строитель",
+            "growth": "Рост",
+            "leadership": "Лидер",
+            "director": "Директор"
+        }
+    }
+
     current_rank = user.rank or "start"
     rank_emoji = rank_emoji_map.get(current_rank, "🔷")
 
-    # Get rank display name from config
-    try:
-        rank_enum = Rank(current_rank)
-        rank_config = RANK_CONFIG()
-        rank_display = rank_config[rank_enum].get("displayName", current_rank.title())
-    except (ValueError, KeyError):
-        rank_display = current_rank.title()
+    # Get localized rank name
+    user_lang = user.lang if user.lang in rank_names else "en"
+    rank_display = rank_names[user_lang].get(current_rank, current_rank.title())
 
     # =========================================================================
     # PIONEER STATUS
@@ -93,6 +109,10 @@ async def handle_team(
 
     # Get next rank
     ranks_order = ["start", "builder", "growth", "leadership", "director"]
+    current_idx = -1
+    next_rank_data = {}
+    rank_config = RANK_CONFIG()  # Load rank config
+
     try:
         current_idx = ranks_order.index(current_rank)
         if current_idx < len(ranks_order) - 1:
@@ -100,7 +120,8 @@ async def handle_team(
             next_rank_enum = Rank(next_rank)
             next_rank_data = rank_config.get(next_rank_enum, {})
 
-            next_rank_name = next_rank_data.get("displayName", next_rank.title())
+            # Get localized next rank name
+            next_rank_name = rank_names[user_lang].get(next_rank, next_rank.title())
             required_volume = float(next_rank_data.get("teamVolumeRequired", Decimal("0")))
 
             # Get qualifying volume from totalVolume JSON
@@ -139,24 +160,33 @@ async def handle_team(
         required_active_partners = int(next_rank_data.get("activePartnersRequired", 0))
 
     # =========================================================================
-    # 50% RULE WARNING
+    # 50% RULE WARNING - determine which template to add
     # =========================================================================
-    rule_50_warning = ""
+    rule_50_template = None
+    capped_count = 0
+
     if user.totalVolume and isinstance(user.totalVolume, dict):
         branches = user.totalVolume.get("branches", [])
         capped_count = sum(1 for b in branches if b.get("isCapped", False))
 
         if capped_count > 0:
-            rule_50_warning = f"⚠️ Правило 50%: {capped_count} ветка достигла лимита\n💡 Развивайте другие ветки"
+            rule_50_template = '/team/rule50_capped'
         elif branches and qualifying_volume > 0:
-            rule_50_warning = "✅ Баланс веток: OK"
+            rule_50_template = '/team/rule50_ok'
+
+    # =========================================================================
+    # BUILD TEMPLATE LIST
+    # =========================================================================
+    template_keys = ['/team']
+    if rule_50_template:
+        template_keys.append(rule_50_template)
 
     # =========================================================================
     # SEND TEMPLATE
     # =========================================================================
     await message_manager.send_template(
         user=user,
-        template_key='/team',
+        template_key=template_keys,
         update=callback_query,
         variables={
             # Rank data
@@ -182,8 +212,8 @@ async def handle_team(
             'active_partners': active_partners,
             'required_active_partners': required_active_partners,
 
-            # 50% rule
-            'rule_50_warning': rule_50_warning,
+            # 50% rule data
+            'capped_count': capped_count,
 
             # Legacy variables (for backward compatibility)
             'userInvitedUplineFirst': direct_referrals,
@@ -243,10 +273,10 @@ async def show_referral_link(
 
 
 # ============================================================================
-# MARKETING PLAN (TEMPORARILY DISABLED)
+# MARKETING PLAN (5-PAGE CAROUSEL)
 # ============================================================================
 
-@team_router.callback_query(F.data == "/team/marketing")
+@team_router.callback_query(F.data.regexp(r"^/team/marketing(?:/(\d+))?$"))
 async def show_marketing_info(
         callback_query: CallbackQuery,
         user: User,
@@ -254,17 +284,73 @@ async def show_marketing_info(
         message_manager: MessageManager
 ):
     """
-    Show marketing plan (commission structure).
+    Show marketing plan carousel (5 pages).
 
-    NOTE: Temporarily disabled while new MLM system is being tested.
-    Old PURCHASE_BONUSES system removed, new MLM system not ready for display yet.
+    Routes:
+        /team/marketing   -> Page 1
+        /team/marketing/2 -> Page 2
+        /team/marketing/3 -> Page 3
+        /team/marketing/4 -> Page 4
+        /team/marketing/5 -> Page 5
     """
-    logger.info(f"User {user.userID} viewing marketing plan (under development)")
+    import re
 
-    # Show under development screen
+    logger.info(f"User {user.userID} viewing marketing plan")
+
+    # =========================================================================
+    # PARSE PAGE NUMBER
+    # =========================================================================
+    match = re.match(r"^/team/marketing(?:/(\d+))?$", callback_query.data)
+    page = 1
+    if match and match.group(1):
+        page = int(match.group(1))
+        if page < 1 or page > 5:
+            page = 1
+
+    # =========================================================================
+    # DYNAMIC DATA
+    # =========================================================================
+
+    # Pioneer slots left
+    pioneer_slots_left = 50
+    root_user = session.query(User).filter(User.upline == User.telegramID).first()
+    if root_user and root_user.mlmStatus:
+        pioneer_count = root_user.mlmStatus.get("pioneerPurchasesCount", 0)
+        pioneer_slots_left = max(0, 50 - pioneer_count)
+
+    # User rank markers (for page 3)
+    lang = user.lang or "en"
+    you_marker = {"en": "← You", "ru": "← Вы", "de": "← Du"}.get(lang, "← You")
+
+    user_rank = user.rank or "start"
+    rank_markers = {
+        "user_rank_marker_start": you_marker if user_rank == "start" else "",
+        "user_rank_marker_builder": you_marker if user_rank == "builder" else "",
+        "user_rank_marker_growth": you_marker if user_rank == "growth" else "",
+        "user_rank_marker_leadership": you_marker if user_rank == "leadership" else "",
+        "user_rank_marker_director": you_marker if user_rank == "director" else "",
+    }
+
+    # =========================================================================
+    # BUILD TEMPLATE KEY
+    # =========================================================================
+    if page == 1:
+        template_key = '/team/marketing'
+    else:
+        template_key = f'/team/marketing/{page}'
+
+    # =========================================================================
+    # SEND TEMPLATE
+    # =========================================================================
     await message_manager.send_template(
         user=user,
-        template_key='under_development',
+        template_key=template_key,
+        variables={
+            'page': page,
+            'total_pages': 5,
+            'pioneer_slots_left': pioneer_slots_left,
+            **rank_markers
+        },
         update=callback_query,
         delete_original=True
     )
@@ -281,9 +367,8 @@ async def handle_team_stats(
         session: Session,
         message_manager: MessageManager
 ):
-    """Show team structure: branch tree with volumes."""
+    """Show team structure: branch tree with volumes using rgroup."""
     from mlm_system.utils.chain_walker import ChainWalker
-    from mlm_system.config.ranks import RANK_CONFIG, Rank
 
     logger.info(f"User {user.userID} viewing team structure")
 
@@ -299,13 +384,19 @@ async def handle_team_stats(
     }
 
     # =========================================================================
-    # GET BRANCHES DATA
+    # GET BRANCHES DATA - build arrays for rgroup
     # =========================================================================
-    branches_tree = []
+    branch_prefixes = []
+    branch_names = []
+    branch_ids = []
+    branch_emojis = []
+    branch_volumes = []
+    branch_teams = []
+    branch_indents = []
+
     cap_limit = 0
     capped_count = 0
 
-    # Try to get from totalVolume JSON first (pre-calculated)
     if user.totalVolume and isinstance(user.totalVolume, dict):
         branches = user.totalVolume.get("branches", [])
         cap_limit = user.totalVolume.get("capLimit", 0)
@@ -313,45 +404,51 @@ async def handle_team_stats(
         # Sort by fullVolume descending, take top 5
         branches_sorted = sorted(branches, key=lambda b: b.get("fullVolume", 0), reverse=True)[:5]
 
-        for branch in branches_sorted:
+        for i, branch in enumerate(branches_sorted):
+            is_last = (i == len(branches_sorted) - 1)
+
             ref_user_id = branch.get("referralUserId")
             ref_user = session.query(User).filter_by(userID=ref_user_id).first() if ref_user_id else None
 
-            # Get name (max 15 chars)
+            # Name (max 15 chars)
             ref_name = branch.get("referralName", "User")
-            # Extract just firstname from "Firstname (ID)" format
             if " (" in ref_name:
                 ref_name = ref_name.split(" (")[0]
             if len(ref_name) > 15:
                 ref_name = ref_name[:12] + "..."
 
-            # Get rank
+            # Rank emoji
             ref_rank = ref_user.rank if ref_user else "start"
             ref_rank_emoji = rank_emoji_map.get(ref_rank, "🔷")
 
-            # Get volumes
+            # Volumes
             full_volume = branch.get("fullVolume", 0)
             capped_volume = branch.get("cappedVolume", full_volume)
             is_capped = branch.get("isCapped", False)
 
             if is_capped:
                 capped_count += 1
+                volume_str = f"${full_volume:,.0f} → ${capped_volume:,.0f} ⚠️"
+            else:
+                volume_str = f"${full_volume:,.0f} ✅"
 
-            # Get team size using ChainWalker
+            # Team size
             team_size = 0
             if ref_user:
                 walker = ChainWalker(session)
                 team_size = walker.count_downline(ref_user)
 
-            branches_tree.append({
-                "name": ref_name,
-                "user_id": ref_user_id or 0,
-                "rank_emoji": ref_rank_emoji,
-                "full_volume": full_volume,
-                "capped_volume": capped_volume,
-                "is_capped": is_capped,
-                "team_size": team_size
-            })
+            # Tree prefixes
+            prefix = "└─" if is_last else "├─"
+            indent = "   " if is_last else "│  "
+
+            branch_prefixes.append(prefix)
+            branch_names.append(ref_name)
+            branch_ids.append(str(ref_user_id or 0))
+            branch_emojis.append(ref_rank_emoji)
+            branch_volumes.append(volume_str)
+            branch_teams.append(str(team_size))
+            branch_indents.append(indent)
     else:
         # Fallback: get direct referrals from DB
         direct_referrals = session.query(User).filter(
@@ -360,8 +457,9 @@ async def handle_team_stats(
 
         walker = ChainWalker(session)
 
-        for ref in direct_referrals:
-            # Get name (max 15 chars)
+        for i, ref in enumerate(direct_referrals):
+            is_last = (i == len(direct_referrals) - 1)
+
             ref_name = ref.firstname or "User"
             if len(ref_name) > 15:
                 ref_name = ref_name[:12] + "..."
@@ -370,66 +468,56 @@ async def handle_team_stats(
             ref_volume = float(ref.fullVolume or ref.personalVolumeTotal or 0)
             team_size = walker.count_downline(ref)
 
-            branches_tree.append({
-                "name": ref_name,
-                "user_id": ref.userID,
-                "rank_emoji": ref_rank_emoji,
-                "full_volume": ref_volume,
-                "capped_volume": ref_volume,
-                "is_capped": False,
-                "team_size": team_size
-            })
+            prefix = "└─" if is_last else "├─"
+            indent = "   " if is_last else "│  "
+
+            branch_prefixes.append(prefix)
+            branch_names.append(ref_name)
+            branch_ids.append(str(ref.userID))
+            branch_emojis.append(ref_rank_emoji)
+            branch_volumes.append(f"${ref_volume:,.0f} ✅")
+            branch_teams.append(str(team_size))
+            branch_indents.append(indent)
 
     # =========================================================================
-    # BUILD TREE TEXT
+    # 50% RULE TEMPLATE + NO REFERRALS CHECK
     # =========================================================================
-    tree_lines = []
+    rule_50_template = None
+    no_referrals_template = None
 
-    for i, branch in enumerate(branches_tree):
-        is_last = (i == len(branches_tree) - 1)
-        prefix = "└─" if is_last else "├─"
-        indent = "   " if is_last else "│  "
-
-        # Name line with rank emoji
-        name_line = f"{prefix} 👤 {branch['name']} ({branch['user_id']}) {branch['rank_emoji']}"
-        tree_lines.append(name_line)
-
-        # Volume line
-        if branch['is_capped']:
-            volume_line = f"{indent} └─ TV: ${branch['full_volume']:,.0f} → ${branch['capped_volume']:,.0f} ⚠️"
-        else:
-            volume_line = f"{indent} └─ TV: ${branch['full_volume']:,.0f} ✅"
-        tree_lines.append(volume_line)
-
-        # Team size line
-        team_line = f"{indent} └─ Команда: {branch['team_size']} чел."
-        tree_lines.append(team_line)
-
-        # Empty line between branches (except last)
-        if not is_last:
-            tree_lines.append("│")
-
-    tree_text = "\n".join(tree_lines) if tree_lines else "Нет рефералов"
-
-    # =========================================================================
-    # 50% RULE INFO
-    # =========================================================================
-    rule_50_text = ""
-    if cap_limit > 0:
-        rule_50_text = f"💡 Правило 50%: Лимит на ветку: ${cap_limit:,.0f}"
+    if not branch_names:
+        no_referrals_template = '/team/stats/no_referrals'
+    elif cap_limit > 0:
         if capped_count > 0:
-            rule_50_text += f"\n⚠️ {capped_count} ветка достигла лимита"
+            rule_50_template = '/team/stats/rule50_capped'
+        else:
+            rule_50_template = '/team/stats/rule50_ok'
+
+    template_keys = ['/team/stats']
+    if no_referrals_template:
+        template_keys.append(no_referrals_template)
+    elif rule_50_template:
+        template_keys.append(rule_50_template)
 
     # =========================================================================
-    # SEND TEMPLATE
+    # SEND TEMPLATE with rgroup
     # =========================================================================
     await message_manager.send_template(
         user=user,
-        template_key='/team/stats',
+        template_key=template_keys,
         variables={
-            'tree_text': tree_text,
-            'rule_50_text': rule_50_text,
-            'branches_count': len(branches_tree)
+            'branches_count': len(branch_names),
+            'cap_limit': f"{cap_limit:,.0f}",
+            'capped_count': capped_count,
+            'rgroup': {
+                'prefix': branch_prefixes,
+                'name': branch_names,
+                'id': branch_ids,
+                'emoji': branch_emojis,
+                'volume': branch_volumes,
+                'team': branch_teams,
+                'indent': branch_indents,
+            } if branch_names else None
         },
         update=callback_query,
         delete_original=True
