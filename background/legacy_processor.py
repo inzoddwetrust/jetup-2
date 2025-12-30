@@ -8,6 +8,8 @@ Processes users from external Google Sheet (LEGACY_SHEET_ID) and:
 3. Creates purchases for legacy shares
 
 Runs automatically every 10 minutes or manually via &legacy command.
+
+V2 Migration (Return of Jedi) available via &legacy v2 command only.
 """
 import asyncio
 import logging
@@ -26,8 +28,20 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-# Legacy migration Google Sheet ID
+# V1 Legacy migration Google Sheet ID
 LEGACY_SHEET_ID = "1mbaRSbOs0Hc98iJ3YnZnyqL5yxeSuPJCef5PFjPHpFg"
+
+# V2 Migration Google Sheet ID (Return of Jedi)
+LEGACY_V2_SHEET_ID = "16ev6awviK3UaXEY7tEYdbmW0D1nQSzJbXUFIaWK2UEc"
+
+# V2 specific constants
+OPTION_JETUP = 25
+OPTION_AQUIX = 26
+PROJECT_JETUP = 2
+PROJECT_AQUIX = 3
+COST_PER_SHARE_JETUP = Decimal("0.05")
+COST_PER_SHARE_AQUIX = Decimal("0.03")
+MINIMUM_GIFT_QTY = 84
 
 
 # =============================================================================
@@ -83,8 +97,35 @@ class LegacyUserRecord:
 
 
 @dataclass
+class LegacyUserRecordV2:
+    """V2 Migration record (Return of Jedi)."""
+    row_index: int
+    email: str
+    parent: str
+    value: int
+    is_found: str
+    upliner_found: str
+    purchase_done: str
+    error_count: int = 0
+    last_error: str = ""
+
+    @property
+    def status(self) -> MigrationStatus:
+        """Determine current migration status based on flags."""
+        user_found = self.is_found and self.is_found != "" and self.is_found != "0"
+
+        if user_found and self.upliner_found == "1" and self.purchase_done == "1":
+            return MigrationStatus.COMPLETED
+        elif self.error_count > 3:
+            return MigrationStatus.ERROR
+        else:
+            return MigrationStatus.PENDING
+
+
+@dataclass
 class MigrationStats:
     """Statistics for a migration run."""
+    # V1 stats (EXISTING - DO NOT RENAME)
     total_records: int = 0
     users_found: int = 0
     upliners_assigned: int = 0
@@ -92,6 +133,14 @@ class MigrationStats:
     completed: int = 0
     errors: int = 0
     error_details: List[Tuple[str, str]] = field(default_factory=list)
+
+    # V2 stats (NEW)
+    v2_total: int = 0
+    v2_users_found: int = 0
+    v2_upliners_assigned: int = 0
+    v2_gifts_granted: int = 0
+    v2_completed: int = 0
+    v2_errors: int = 0
 
     def add_error(self, email: str, error: str):
         """Record an error for a specific user."""
@@ -115,6 +164,7 @@ class LegacyUserProcessor:
     - Email normalization (case-insensitive, Gmail dot handling)
     - Caching to reduce Google Sheets API calls
     - Exponential backoff on errors
+    - V2 migration support (double gifts)
     """
 
     def __init__(self, check_interval: int = 600, batch_size: int = 50):
@@ -128,9 +178,15 @@ class LegacyUserProcessor:
         self.check_interval = check_interval
         self.batch_size = batch_size
         self._running = False
-        self._processing = False  # Lock flag for active processing
-        self._cache = None  # Cache for Google Sheets data
-        self._cache_loaded_at = None  # Timestamp of last cache load
+        self._processing = False
+
+        # V1 cache
+        self._cache = None
+        self._cache_loaded_at = None
+
+        # V2 cache
+        self._v2_cache = None
+        self._v2_cache_loaded_at = None
 
         # Email lookup cache (populated during processing)
         self._email_cache: Optional[dict] = None
@@ -153,9 +209,12 @@ class LegacyUserProcessor:
         self._running = False
         logger.info("Stopping legacy migration processor")
 
-    async def run_once(self) -> MigrationStats:
+    async def run_once(self, migration: Optional[str] = None) -> MigrationStats:
         """
         Run migration once (for manual trigger via &legacy command).
+
+        Args:
+            migration: Optional filter - "v2" to run V2 only, None for original V1
 
         Returns:
             MigrationStats with processing results
@@ -168,10 +227,15 @@ class LegacyUserProcessor:
 
         self._processing = True
         try:
-            return await self._process_legacy_users()
+            if migration == "v2":
+                # V2 migration only
+                return await self._process_v2_users()
+            else:
+                # Default: original V1 migration only
+                return await self._process_legacy_users()
         finally:
             self._processing = False
-            self._email_cache = None  # Clear cache after run
+            self._email_cache = None
 
     # =========================================================================
     # EMAIL NORMALIZATION
@@ -267,9 +331,12 @@ class LegacyUserProcessor:
         while self._running:
             try:
                 self._processing = True
+
+                # Run V1 migration only (default behavior)
                 stats = await self._process_legacy_users()
+
                 self._processing = False
-                self._email_cache = None  # Clear cache after each run
+                self._email_cache = None
 
                 if any([stats.users_found, stats.upliners_assigned, stats.purchases_created]):
                     logger.info(
@@ -300,7 +367,7 @@ class LegacyUserProcessor:
                 await asyncio.sleep(self.check_interval * consecutive_errors)
 
     # =========================================================================
-    # CACHE MANAGEMENT
+    # V1 CACHE MANAGEMENT
     # =========================================================================
 
     async def _load_cache(self, force: bool = False):
@@ -316,9 +383,14 @@ class LegacyUserProcessor:
 
         try:
             logger.info("Loading legacy users from Google Sheets to cache...")
-            sheets_client, _ = get_google_services()
-            sheet = sheets_client.open_by_key(LEGACY_SHEET_ID).worksheet("Users")
-            records = sheet.get_all_records()
+
+            sheets_client, _ = await get_google_services()
+
+            def _read_sheet():
+                sheet = sheets_client.open_by_key(LEGACY_SHEET_ID).worksheet("Users")
+                return sheet.get_all_records()
+
+            records = await asyncio.to_thread(_read_sheet)
 
             self._cache = records
             self._cache_loaded_at = datetime.now()
@@ -347,7 +419,7 @@ class LegacyUserProcessor:
 
             legacy_users = []
 
-            for idx, record in enumerate(records, start=2):  # Start from row 2 (after header)
+            for idx, record in enumerate(records, start=2):
                 try:
                     # Validation - check required fields
                     required_fields = ['email', 'project', 'qty']
@@ -395,7 +467,7 @@ class LegacyUserProcessor:
             return []
 
     # =========================================================================
-    # MAIN PROCESSING
+    # V1 MAIN PROCESSING
     # =========================================================================
 
     async def _process_legacy_users(self) -> MigrationStats:
@@ -429,8 +501,6 @@ class LegacyUserProcessor:
 
                         if result == "user_found":
                             stats.users_found += 1
-                        elif result == "upliner_assigned":
-                            stats.upliners_assigned += 1
                         elif result == "purchase_created":
                             stats.purchases_created += 1
                         elif result == "completed":
@@ -451,11 +521,12 @@ class LegacyUserProcessor:
         Process a single legacy user through the migration pipeline.
         Each step checks the current state and proceeds accordingly.
 
+        Steps are independent - purchase is created even if upliner assignment fails.
+
         Returns:
             String indicating what action was taken:
             - "user_found": User was found in DB
-            - "upliner_assigned": Upliner was assigned
-            - "purchase_created": Purchase was created
+            - "purchase_created": Purchase was created (may or may not have upliner)
             - "completed": User already completed
             - None: No action taken
         """
@@ -467,13 +538,14 @@ class LegacyUserProcessor:
                     return "user_found"
                 return None
 
-            # Step 2: Assign upliner
+            # Step 2: Assign upliner (OPTIONAL - doesn't block Step 3)
             if user.upliner_found != "1" and user.upliner:
-                if await self._assign_upliner(session, user):
-                    return "upliner_assigned"
-                return None
+                try:
+                    await self._assign_upliner(session, user)
+                except Exception as e:
+                    logger.warning(f"Could not assign upliner for {user.email}, continuing to purchase: {e}")
 
-            # Step 3: Create purchase
+            # Step 3: Create purchase (ALWAYS runs if user is found)
             if user.purchase_done != "1":
                 if await self._create_purchase(session, user):
                     return "purchase_created"
@@ -486,7 +558,7 @@ class LegacyUserProcessor:
             return None
 
     # =========================================================================
-    # STEP 1: FIND USER
+    # V1 STEP 1: FIND USER
     # =========================================================================
 
     async def _find_user(self, session: Session, user: LegacyUserRecord) -> bool:
@@ -509,7 +581,7 @@ class LegacyUserProcessor:
             return False
 
     # =========================================================================
-    # STEP 2: ASSIGN UPLINER
+    # V1 STEP 2: ASSIGN UPLINER
     # =========================================================================
 
     async def _assign_upliner(self, session: Session, user: LegacyUserRecord) -> bool:
@@ -566,7 +638,7 @@ class LegacyUserProcessor:
             return False
 
     # =========================================================================
-    # STEP 3: CREATE PURCHASE
+    # V1 STEP 3: CREATE PURCHASE
     # =========================================================================
 
     async def _create_purchase(self, session: Session, user: LegacyUserRecord) -> bool:
@@ -660,7 +732,7 @@ class LegacyUserProcessor:
             return False
 
     # =========================================================================
-    # GOOGLE SHEETS UPDATE
+    # V1 GOOGLE SHEETS UPDATE
     # =========================================================================
 
     async def _update_sheet(self, row_index: int, field_name: str, value: str):
@@ -680,11 +752,15 @@ class LegacyUserProcessor:
 
         for attempt in range(3):
             try:
-                sheets_client, _ = get_google_services()
-                sheet = sheets_client.open_by_key(LEGACY_SHEET_ID).worksheet("Users")
-                cell_address = f"{field_columns[field_name]}{row_index}"
-                sheet.update(cell_address, value)
-                logger.debug(f"Updated sheet {cell_address} = {value}")
+                sheets_client, _ = await get_google_services()
+
+                def _write_cell():
+                    sheet = sheets_client.open_by_key(LEGACY_SHEET_ID).worksheet("Users")
+                    cell_address = f"{field_columns[field_name]}{row_index}"
+                    sheet.update(cell_address, [[value]])
+
+                await asyncio.to_thread(_write_cell)
+                logger.debug(f"Updated sheet {field_columns[field_name]}{row_index} = {value}")
                 return
             except Exception as e:
                 if attempt == 2:
@@ -693,7 +769,7 @@ class LegacyUserProcessor:
                     await asyncio.sleep(2 ** attempt)
 
     # =========================================================================
-    # NOTIFICATIONS
+    # V1 NOTIFICATIONS
     # =========================================================================
 
     async def _send_welcome_notification(self, user: User, legacy_user: LegacyUserRecord):
@@ -813,6 +889,302 @@ class LegacyUserProcessor:
 
         except Exception as e:
             logger.error(f"Error sending legacy purchase notifications: {e}")
+
+    # =========================================================================
+    # V2 PROCESSING (NEW)
+    # =========================================================================
+
+    async def _load_v2_cache(self, force: bool = False):
+        """Load V2 records from Google Sheets."""
+        if not force and self._v2_cache is not None:
+            logger.debug("Using existing V2 cache")
+            return
+
+        try:
+            logger.info("Loading V2 migration data from Google Sheets...")
+
+            sheets_client, _ = await get_google_services()
+
+            def _read_v2():
+                sheet = sheets_client.open_by_key(LEGACY_V2_SHEET_ID).worksheet("Users")
+                return sheet.get_all_records()
+
+            records = await asyncio.to_thread(_read_v2)
+
+            self._v2_cache = records
+            self._v2_cache_loaded_at = datetime.now()
+            logger.info(f"V2 cache loaded: {len(records)} records")
+
+        except Exception as e:
+            logger.error(f"Failed to load V2 cache: {e}", exc_info=True)
+            raise
+
+    async def _get_v2_users(self) -> List[LegacyUserRecordV2]:
+        """Get pending V2 migration records."""
+        try:
+            if self._v2_cache is None:
+                await self._load_v2_cache()
+
+            records = self._v2_cache
+            if not records:
+                return []
+
+            v2_users = []
+            for idx, record in enumerate(records, start=2):
+                try:
+                    if not record.get('email'):
+                        continue
+
+                    email = record['email'].strip().lower()
+                    if '@' not in email:
+                        continue
+
+                    value = 0
+                    try:
+                        value = int(record.get('value', 0))
+                    except (ValueError, TypeError):
+                        pass
+
+                    user = LegacyUserRecordV2(
+                        row_index=idx,
+                        email=email,
+                        parent=record.get('parent', '').strip(),
+                        value=value,
+                        is_found=str(record.get('IsFound', '')),
+                        upliner_found=str(record.get('UplinerFound', '')),
+                        purchase_done=str(record.get('PurchaseDone', ''))
+                    )
+
+                    if user.status != MigrationStatus.COMPLETED:
+                        v2_users.append(user)
+
+                except Exception as e:
+                    logger.error(f"Error parsing V2 record {idx}: {e}")
+                    continue
+
+            logger.info(f"Found {len(v2_users)} pending V2 users")
+            return v2_users
+
+        except Exception as e:
+            logger.error(f"Error loading V2 users: {e}")
+            return []
+
+    async def _process_v2_users(self) -> MigrationStats:
+        """Process V2 migration users."""
+        stats = MigrationStats()
+
+        await self._load_v2_cache(force=True)
+        v2_users = await self._get_v2_users()
+
+        if not v2_users:
+            return stats
+
+        stats.v2_total = len(v2_users)
+
+        for i in range(0, len(v2_users), self.batch_size):
+            batch = v2_users[i:i + self.batch_size]
+            logger.info(f"Processing V2 batch: {len(batch)} users")
+
+            for user in batch:
+                with get_db_session_ctx() as session:
+                    try:
+                        self._email_cache = None
+                        result = await self._process_v2_single_user(session, user)
+
+                        if result == "user_found":
+                            stats.v2_users_found += 1
+                        elif result == "upliner_assigned":
+                            stats.v2_upliners_assigned += 1
+                        elif result == "gifts_granted":
+                            stats.v2_gifts_granted += 1
+                        elif result == "completed":
+                            stats.v2_completed += 1
+
+                    except Exception as e:
+                        stats.v2_errors += 1
+                        logger.error(f"Error processing V2 user {user.email}: {e}", exc_info=True)
+
+            if i + self.batch_size < len(v2_users):
+                await asyncio.sleep(2)
+
+        return stats
+
+    async def _process_v2_single_user(self, session: Session, user: LegacyUserRecordV2) -> Optional[str]:
+        """Process single V2 user."""
+        try:
+            user_found = user.is_found and user.is_found != "" and user.is_found != "0"
+
+            if not user_found:
+                if await self._v2_find_user(session, user):
+                    return "user_found"
+                return None
+
+            if user.upliner_found != "1" and user.parent:
+                if await self._v2_assign_upliner(session, user):
+                    return "upliner_assigned"
+                return None
+
+            if user.purchase_done != "1":
+                if await self._v2_grant_double_gift(session, user):
+                    return "gifts_granted"
+                return None
+
+            return "completed"
+
+        except Exception as e:
+            logger.error(f"Error in _process_v2_single_user for {user.email}: {e}")
+            return None
+
+    async def _v2_find_user(self, session: Session, user: LegacyUserRecordV2) -> bool:
+        """Find user for V2 migration."""
+        try:
+            db_user = self._get_user_by_email(session, user.email)
+            if not db_user:
+                logger.debug(f"V2: User {user.email} not found yet")
+                return False
+
+            logger.info(f"V2: Found user {user.email} -> userID={db_user.userID}")
+            await self._update_v2_sheet(user.row_index, 'IsFound', str(db_user.userID))
+            return True
+
+        except Exception as e:
+            logger.error(f"V2: Error finding user {user.email}: {e}")
+            return False
+
+    async def _v2_assign_upliner(self, session: Session, user: LegacyUserRecordV2) -> bool:
+        """Assign upliner for V2 migration."""
+        try:
+            if not user.parent:
+                logger.debug(f"V2: No parent for {user.email}")
+                return False
+
+            db_user = self._get_user_by_email(session, user.email)
+            if not db_user:
+                return False
+
+            parent = self._get_user_by_email(session, user.parent)
+            if not parent:
+                logger.warning(f"V2: Parent {user.parent} not found for {user.email}")
+                return False
+
+            old_upline = db_user.upline if hasattr(db_user, 'upline') else None
+
+            if old_upline != parent.telegramID:
+                logger.info(f"V2: Setting parent for {user.email} to {parent.telegramID}")
+                db_user.upline = parent.telegramID
+                session.commit()
+
+            await self._update_v2_sheet(user.row_index, 'UplinerFound', '1')
+            return True
+
+        except Exception as e:
+            logger.error(f"V2: Error assigning parent for {user.email}: {e}")
+            return False
+
+    async def _v2_grant_double_gift(self, session: Session, user: LegacyUserRecordV2) -> bool:
+        """Grant double gift (JETUP + AQUIX) for V2 migration."""
+        try:
+            db_user = self._get_user_by_email(session, user.email)
+            if not db_user:
+                return False
+
+            # Calculate gift quantities
+            if user.value == 0:
+                jetup_qty = MINIMUM_GIFT_QTY
+                aquix_qty = MINIMUM_GIFT_QTY
+            else:
+                jetup_qty = int(user.value / COST_PER_SHARE_JETUP)
+                aquix_qty = int(user.value / COST_PER_SHARE_AQUIX)
+
+            # Get options
+            jetup_option = session.query(Option).filter_by(optionID=OPTION_JETUP).first()
+            aquix_option = session.query(Option).filter_by(optionID=OPTION_AQUIX).first()
+
+            if not jetup_option or not aquix_option:
+                logger.error("V2: JETUP or AQUIX options not found")
+                return False
+
+            # Create JETUP balance
+            jetup_balance = ActiveBalance()
+            jetup_amount = Decimal(str(jetup_qty * COST_PER_SHARE_JETUP))
+            jetup_fields = {
+                'userID': db_user.userID,
+                'firstname': db_user.firstname,
+                'surname': db_user.surname,
+                'amount': jetup_amount,
+                'status': 'done',
+                'reason': f'legacy_v2_gift=jetup',
+                'link': '',
+                'notes': f'V2 Migration Gift: {jetup_qty} JETUP shares at ${COST_PER_SHARE_JETUP}/share',
+                'ownerTelegramID': db_user.telegramID,
+                'ownerEmail': db_user.email
+            }
+            for field, value in jetup_fields.items():
+                setattr(jetup_balance, field, value)
+            session.add(jetup_balance)
+
+            # Create AQUIX balance
+            aquix_balance = ActiveBalance()
+            aquix_amount = Decimal(str(aquix_qty * COST_PER_SHARE_AQUIX))
+            aquix_fields = {
+                'userID': db_user.userID,
+                'firstname': db_user.firstname,
+                'surname': db_user.surname,
+                'amount': aquix_amount,
+                'status': 'done',
+                'reason': f'legacy_v2_gift=aquix',
+                'link': '',
+                'notes': f'V2 Migration Gift: {aquix_qty} AQUIX shares at ${COST_PER_SHARE_AQUIX}/share',
+                'ownerTelegramID': db_user.telegramID,
+                'ownerEmail': db_user.email
+            }
+            for field, value in aquix_fields.items():
+                setattr(aquix_balance, field, value)
+            session.add(aquix_balance)
+
+            session.commit()
+
+            await self._update_v2_sheet(user.row_index, 'PurchaseDone', '1')
+
+            logger.info(
+                f"V2: Granted double gift to {db_user.email}: "
+                f"{jetup_qty} JETUP (${jetup_amount}) + {aquix_qty} AQUIX (${aquix_amount})"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"V2: Error granting gift to {user.email}: {e}")
+            return False
+
+    async def _update_v2_sheet(self, row_index: int, field_name: str, value: str):
+        """Update V2 Google Sheet."""
+        field_columns = {
+            'IsFound': 'D',
+            'UplinerFound': 'E',
+            'PurchaseDone': 'F'
+        }
+
+        if field_name not in field_columns:
+            logger.warning(f"V2: Unknown field: {field_name}")
+            return
+
+        for attempt in range(3):
+            try:
+                sheets_client, _ = await get_google_services()
+
+                def _write_v2():
+                    sheet = sheets_client.open_by_key(LEGACY_V2_SHEET_ID).worksheet("Users")
+                    cell = f"{field_columns[field_name]}{row_index}"
+                    sheet.update(cell, [[value]])
+
+                await asyncio.to_thread(_write_v2)
+                logger.debug(f"V2: Updated {field_columns[field_name]}{row_index} = {value}")
+                return
+            except Exception as e:
+                if attempt == 2:
+                    logger.error(f"V2: Failed to update after 3 attempts: {e}")
+                else:
+                    await asyncio.sleep(2 ** attempt)
 
 
 # =============================================================================

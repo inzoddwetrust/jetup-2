@@ -34,6 +34,7 @@ class ServiceManager:
         self.transfer_bonus_processor: Optional['TransferBonusProcessor'] = None
         self.invoice_cleaner: Optional['InvoiceCleaner'] = None
         self.mlm_scheduler: Optional['MLMScheduler'] = None
+        self.legacy_processor: Optional['LegacyUserProcessor'] = None
 
         self._shutdown_event = asyncio.Event()
 
@@ -50,6 +51,17 @@ class ServiceManager:
         logger.info("=" * 60)
         logger.info("STARTING BACKGROUND SERVICES")
         logger.info("=" * 60)
+
+        # ═══════════════════════════════════════════════════════════════
+        # CRITICAL: Sync PostgreSQL sequences before ANY database writes
+        # ═══════════════════════════════════════════════════════════════
+        try:
+            from core.sequence_sync import sync_all_sequences
+            logger.info("Synchronizing PostgreSQL sequences...")
+            await sync_all_sequences()
+        except Exception as e:
+            logger.warning(f"Could not sync sequences (non-critical): {e}")
+            # Continue - this is not critical for startup
 
         # ═══════════════════════════════════════════════════════════════
         # SERVICE 1: Notification Processor
@@ -105,12 +117,25 @@ class ServiceManager:
         logger.info("  → Scheduled Tasks: every 1 hour")
         logger.info("  → Daily Tasks: 00:00 UTC")
 
+        # ═══════════════════════════════════════════════════════════════
+        # SERVICE 5: Legacy User Processor
+        # ═══════════════════════════════════════════════════════════════
+        from background.legacy_processor import legacy_processor
+
+        self.legacy_processor = legacy_processor
+        task = asyncio.create_task(
+            self.legacy_processor.start(),
+            name="legacy_processor"
+        )
+        self.services.append(task)
+        logger.info("✓ Legacy processor started (600s interval)")
+
         logger.info("=" * 60)
-        logger.info(f"✅ STARTED {len(self.services)} background services + MLM Scheduler")
+        logger.info(f"✅ STARTED {len(self.services)} background services + MLM Scheduler + Legacy Processor")
         logger.info("=" * 60)
 
         # ═══════════════════════════════════════════════════════════════
-        # SERVICE 5: Webhook Server (Google Sheets Sync)
+        # SERVICE 6: Webhook Server (Google Sheets Sync)
         # ═══════════════════════════════════════════════════════════════
 
         try:
@@ -131,6 +156,10 @@ class ServiceManager:
         # ═══════════════════════════════════════════════════════════════
         # Stop each service gracefully
         # ═══════════════════════════════════════════════════════════════
+
+        if self.legacy_processor:
+            logger.info("Stopping legacy processor...")
+            await self.legacy_processor.stop()
 
         if self.notification_processor:
             logger.info("Stopping notification processor...")
