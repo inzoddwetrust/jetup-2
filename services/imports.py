@@ -1,9 +1,10 @@
-# jetup/services/imports.py
+# services/imports.py
 """
 Import services for Projects, Options, and other data from Google Sheets.
 """
 import logging
 from typing import Dict, Any
+from decimal import Decimal
 
 from core.db import get_session
 from core.google_services import get_google_services
@@ -112,10 +113,13 @@ async def import_projects_and_options() -> Dict[str, Any]:
                     option.optionID = row['optionID']
                     option.projectID = row['projectID']
                     option.projectName = row['projectName']
-                    option.costPerShare = float(row['costPerShare']) if row.get('costPerShare') else None
-                    option.packQty = int(row['packQty']) if row.get('packQty') else None
-                    option.packPrice = float(row['packPrice']) if row.get('packPrice') else None
-                    option.isActive = str(row.get('isActive', 'TRUE')).upper() == 'TRUE'
+                    option.costPerShare = float(row.get('costPerShare', 0))
+                    option.packQty = int(row.get('packQty', 0))
+                    option.packPrice = float(row.get('packPrice', 0))
+
+                    # isActive = True ONLY if value is "1"
+                    # Column name in Google Sheets: "isActive?"
+                    option.isActive = str(row.get('isActive?', '')).strip() == '1'
 
                     if not is_update:
                         session.add(option)

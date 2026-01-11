@@ -621,6 +621,12 @@ async def handle_email_verification(
         session.commit()
         session.refresh(user)
 
+        # ═════════════════════════════════════════════════════════════════
+        # LEGACY MIGRATION: Process user immediately on email verification
+        # ═════════════════════════════════════════════════════════════════
+        from services.legacy_migration_service import LegacyMigrationService
+        await LegacyMigrationService.process_user_on_email_verify(user, session)
+
         logger.info(f"Email verified successfully for user {user.telegramID}")
 
         await message_manager.send_template(

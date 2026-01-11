@@ -18,6 +18,7 @@ from models.passive_balance import PassiveBalance
 from models.project import Project
 from models.option import Option
 from models.notification import Notification, NotificationDelivery
+from models.legacy_migration import LegacyMigrationV1, LegacyMigrationV2
 
 # MLM config
 from models.mlm.rank_history import RankHistory
@@ -43,6 +44,8 @@ __all__ = [
     'Option',
     'Notification',
     'NotificationDelivery',
+    'LegacyMigrationV1',
+    'LegacyMigrationV2',
 
     # MLM
     'RankHistory',

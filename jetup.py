@@ -22,11 +22,11 @@ from core.system_services import (
 )
 from utils.crypto_rates import get_crypto_rates
 from services.stats_service import (
-            update_users_count,
-            update_projects_count,
-            update_invested_total,
-            update_sorted_projects
-        )
+    update_users_count,
+    update_projects_count,
+    update_invested_total,
+    update_sorted_projects
+)
 from handlers import register_all_handlers
 
 # Configure logging
@@ -76,14 +76,37 @@ async def initialize_bot():
         logger.info("✓ Configuration validated")
 
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 3.5: Load dynamic configuration from Google Sheets
+        # STEP 4: Load dynamic configuration from Google Sheets
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("📥 Loading dynamic configuration from Google Sheets...")
         await Config.initialize_dynamic_from_sheets()
         logger.info("✓ Dynamic configuration loaded")
 
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 3.7: Register dynamic values (crypto rates, statistics)
+        # STEP 5: Import Projects and Options from Google Sheets
+        # ═══════════════════════════════════════════════════════════════════════
+        logger.info("📦 Importing Projects and Options from Google Sheets...")
+        try:
+            from services.imports import import_projects_and_options
+            import_result = await import_projects_and_options()
+
+            if import_result.get("success"):
+                projects_stats = import_result.get('projects', {})
+                options_stats = import_result.get('options', {})
+                logger.info(
+                    f"✓ Projects/Options imported: "
+                    f"Projects (+{projects_stats.get('added', 0)} ~{projects_stats.get('updated', 0)}), "
+                    f"Options (+{options_stats.get('added', 0)} ~{options_stats.get('updated', 0)})"
+                )
+            else:
+                errors = import_result.get("error_messages", ["Unknown error"])
+                logger.warning(f"⚠️ Projects/Options import failed: {errors[0]}")
+        except Exception as e:
+            logger.warning(f"⚠️ Projects/Options import error: {e}")
+            # Don't fail startup - admin can run &upro manually
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # STEP 6: Register dynamic values (crypto rates, statistics)
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("📊 Registering dynamic values...")
 
@@ -132,7 +155,7 @@ async def initialize_bot():
         logger.info("✓ Update loop started")
 
         # ════════════════════════════════════════════════════════════════════════
-        # STEP 3.8: Initialize EmailService
+        # STEP 7: Initialize EmailService
         # ════════════════════════════════════════════════════════════════════════
         logger.info("📧 Initializing email service...")
         from email_system import EmailService
@@ -142,7 +165,7 @@ async def initialize_bot():
         logger.info("✓ EmailService initialized and registered")
 
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 4: Initialize bot and dispatcher
+        # STEP 8: Initialize bot and dispatcher
         # ═══════════════════════════════════════════════════════════════════════
         api_token = Config.get(Config.API_TOKEN)
         if not api_token:
@@ -161,7 +184,7 @@ async def initialize_bot():
         logger.info(f"   ID: {bot_info.get('id')}")
 
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 5: Setup middleware
+        # STEP 9: Setup middleware
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("🔧 Setting up middleware...")
         dp.message.middleware(UserMiddleware(bot))
@@ -169,21 +192,21 @@ async def initialize_bot():
         logger.info("✓ Middleware configured")
 
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 6: Setup resources (templates, actions)
+        # STEP 10: Setup resources (templates, actions)
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("📚 Loading resources (templates, actions)...")
         message_manager = await setup_resources(bot)
         logger.info("✓ Resources loaded")
 
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 7: Register handlers
+        # STEP 11: Register handlers
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("🎯 Registering handlers...")
         register_all_handlers(dp, bot)
         logger.info("✓ Handlers registered")
 
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 7.5: Setup MLM event handlers
+        # STEP 12: Setup MLM event handlers
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("🎲 Setting up MLM event handlers...")
         from mlm_system.events.setup import setup_mlm_event_handlers
@@ -191,7 +214,7 @@ async def initialize_bot():
         logger.info("✓ MLM event handlers registered")
 
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 8: Initialize service manager
+        # STEP 13: Initialize service manager
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("⚙️ Initializing service manager...")
         service_manager = ServiceManager(bot)
@@ -199,7 +222,7 @@ async def initialize_bot():
         logger.info("✓ Service manager ready")
 
         # ═══════════════════════════════════════════════════════════════════════
-        # STEP 9: Start background services
+        # STEP 14: Start background services
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("🚀 Starting background services...")
         await service_manager.start_services()

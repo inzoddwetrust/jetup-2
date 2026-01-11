@@ -229,9 +229,9 @@ class OptionImporter:
                         option.packQty = int(row.get('packQty', 0))
                         option.packPrice = Decimal(str(row.get('packPrice', 0)))
 
-                        # Handle isActive with various possible column names
-                        is_active_value = row.get('isActive', row.get('isActive?', True))
-                        option.isActive = is_active_value in [True, 1, '1', 'true', 'True', 'TRUE']
+                        # isActive = True ONLY if value is "1"
+                        # Column name in Google Sheets: "isActive?"
+                        option.isActive = str(row.get('isActive?', '')).strip() == '1'
 
                         if not is_update:
                             session.add(option)
