@@ -548,6 +548,9 @@ __all__ = [
     'get_user_note',
     'set_user_note',
 
+    # Email
+    'normalize_email',
+
     # Data parsing
     'parse_date',
     'parse_bool',

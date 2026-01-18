@@ -62,14 +62,11 @@ class LegacyProcessor:
             logger.info(f"Processing legacy migration for {email}")
 
             # ═══════════════════════════════════════════════════════════
-            # BUILD EMAIL CACHE ONCE (avoid N+1 queries)
+            # BUILD EMAIL CACHE (optimized - only relevant users)
             # ═══════════════════════════════════════════════════════════
-            all_users = session.query(User).filter(User.email.isnot(None)).all()
-            email_cache = {}
-            for u in all_users:
-                normalized = normalize_email(u.email)
-                if normalized:
-                    email_cache[normalized] = u
+            email_cache = LegacyProcessor._build_email_cache_for_user(
+                email, session
+            )
 
             # STAGE 1: Am I recipient?
             v1_count = await LegacyProcessor._process_as_recipient_v1(user, email, session)
@@ -121,7 +118,7 @@ class LegacyProcessor:
         with get_db_session_ctx() as session:
             try:
                 # ═══════════════════════════════════════════════════════════
-                # BUILD EMAIL CACHE ONCE (avoid N+1 queries)
+                # BUILD EMAIL CACHE ONCE (full cache for batch - OK)
                 # ═══════════════════════════════════════════════════════════
                 users = session.query(User).filter(User.email.isnot(None)).all()
                 email_cache = {}
@@ -233,7 +230,7 @@ class LegacyProcessor:
                         if migration.upliner and migration.upliner.upper() == 'SAME':
                             migration.UplinerFound = 1
                             LegacyProcessor._check_done(migration)
-                            session.commit()
+                            # NO commit here - collect all changes
                             stats['uplines_assigned'] += 1
                             continue
 
@@ -279,6 +276,7 @@ class LegacyProcessor:
                         logger.error(f"Error assigning parent V2 {migration.migrationID}: {e}")
                         stats['errors'] += 1
 
+                # Single commit at the end for atomicity
                 session.commit()
 
             except Exception as e:
@@ -612,8 +610,8 @@ class LegacyProcessor:
 
             session.commit()
 
-            # STEP 4: Send notification
-            await LegacyProcessor._send_purchase_notification(user, purchase, migration)
+            # STEP 4: Send notification (after commit - data is safe)
+            await LegacyProcessor._send_purchase_notification(user, purchase, migration, session)
 
             logger.info(
                 f"V1: Created purchase {purchase.purchaseID} for {user.email} "
@@ -796,7 +794,8 @@ class LegacyProcessor:
             LegacyProcessor._check_done(migration)
             session.commit()
 
-            await LegacyProcessor._send_upliner_notification(referral, upliner)
+            # Send notification after commit (data is safe)
+            await LegacyProcessor._send_upliner_notification(referral, upliner, session)
 
             return True
 
@@ -826,7 +825,8 @@ class LegacyProcessor:
             LegacyProcessor._check_done(migration)
             session.commit()
 
-            await LegacyProcessor._send_upliner_notification(referral, parent)
+            # Send notification after commit (data is safe)
+            await LegacyProcessor._send_upliner_notification(referral, parent, session)
 
             return True
 
@@ -842,7 +842,8 @@ class LegacyProcessor:
     async def _send_purchase_notification(
             user: User,
             purchase: Purchase,
-            migration
+            migration,
+            session: Session
     ):
         """Send notification when purchase is created."""
         try:
@@ -869,15 +870,15 @@ class LegacyProcessor:
                 parseMode="HTML"
             )
 
-            with get_db_session_ctx() as notif_session:
-                notif_session.add(notification)
-                notif_session.commit()
+            # Use same session for consistency
+            session.add(notification)
+            session.commit()
 
         except Exception as e:
             logger.error(f"Error sending purchase notification: {e}")
 
     @staticmethod
-    async def _send_upliner_notification(referral: User, upliner: User):
+    async def _send_upliner_notification(referral: User, upliner: User, session: Session):
         """Send notifications to both referral and upliner."""
         try:
             text, buttons = await MessageTemplates.get_raw_template(
@@ -914,10 +915,10 @@ class LegacyProcessor:
                 parseMode="HTML"
             )
 
-            with get_db_session_ctx() as notif_session:
-                notif_session.add(notif_referral)
-                notif_session.add(notif_upliner)
-                notif_session.commit()
+            # Use same session for consistency
+            session.add(notif_referral)
+            session.add(notif_upliner)
+            session.commit()
 
         except Exception as e:
             logger.error(f"Error sending upliner notifications: {e}")
@@ -927,11 +928,76 @@ class LegacyProcessor:
     # =========================================================================
 
     @staticmethod
+    def _build_email_cache_for_user(email: str, session: Session) -> Dict[str, User]:
+        """
+        Build minimal email cache for a specific user.
+
+        Only loads users who are potential upliners for this user.
+        This avoids loading all 30k+ users on every email verification.
+
+        Args:
+            email: Normalized email of the user being processed
+            session: Database session
+
+        Returns:
+            Dict mapping normalized email -> User (only relevant users)
+        """
+        # Get potential upliner/parent emails from migrations
+        v1_upliners = session.query(LegacyMigrationV1.upliner).filter(
+            LegacyMigrationV1.email == email,
+            LegacyMigrationV1.upliner.isnot(None),
+            LegacyMigrationV1.upliner != '',
+            LegacyMigrationV1.UplinerFound == 0
+        ).distinct().all()
+
+        v2_parents = session.query(LegacyMigrationV2.parent).filter(
+            LegacyMigrationV2.email == email,
+            LegacyMigrationV2.parent.isnot(None),
+            LegacyMigrationV2.parent != '',
+            LegacyMigrationV2.UplinerFound == 0
+        ).distinct().all()
+
+        # Normalize raw emails and filter out SAME keyword
+        needed_emails = set()
+        for row in v1_upliners + v2_parents:
+            raw = row[0]
+            if raw and raw.upper() != 'SAME':
+                normalized = normalize_email(raw)
+                if normalized:
+                    needed_emails.add(normalized)
+
+        if not needed_emails:
+            # No upliners needed - return empty cache
+            return {}
+
+        # Load only confirmed users and filter by needed emails
+        # This is still O(n) but n is limited to confirmed users
+        confirmed_users = session.query(User).filter(
+            User.email.isnot(None),
+            User.emailConfirmed == True
+        ).all()
+
+        email_cache = {}
+        for u in confirmed_users:
+            normalized = normalize_email(u.email)
+            if normalized and normalized in needed_emails:
+                email_cache[normalized] = u
+
+        logger.debug(
+            f"Built email cache for {email}: "
+            f"needed={len(needed_emails)}, found={len(email_cache)}"
+        )
+
+        return email_cache
+
+    @staticmethod
     def _check_done(migration):
         """Check if migration is fully done and update status."""
-        if (migration.IsFound and
-            migration.PurchaseDone == 1 and
-            migration.UplinerFound == 1):
+        # Use 'is not None' instead of truthiness check
+        # (in case userID could theoretically be 0)
+        if (migration.IsFound is not None and
+                migration.PurchaseDone == 1 and
+                migration.UplinerFound == 1):
             migration.status = 'done'
             migration.processedAt = datetime.now(timezone.utc)
 

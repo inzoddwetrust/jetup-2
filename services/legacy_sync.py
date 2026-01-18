@@ -170,7 +170,9 @@ class LegacySyncService:
                             # Update only source fields if changed
                             changed = False
 
-                            new_upliner = row.get('upliner', '').strip().lower()
+                            new_upliner = LegacySyncService._normalize_upliner(
+                                row.get('upliner', '')
+                            )
                             if existing.upliner != new_upliner:
                                 existing.upliner = new_upliner
                                 changed = True
@@ -192,7 +194,9 @@ class LegacySyncService:
                             # (multiple records for same user)
                             migration = LegacyMigrationV1()
                             migration.email = email
-                            migration.upliner = row.get('upliner', '').strip().lower()
+                            migration.upliner = LegacySyncService._normalize_upliner(
+                                row.get('upliner', '')
+                            )
                             migration.project = row.get('project', '').strip()
                             migration.qty = LegacySyncService._parse_qty(row.get('qty'))
                             migration.gsRowIndex = idx
@@ -369,7 +373,9 @@ class LegacySyncService:
                         if existing:
                             changed = False
 
-                            new_parent = row.get('parent', '').strip().lower()
+                            new_parent = LegacySyncService._normalize_upliner(
+                                row.get('parent', '')
+                            )
                             if existing.parent != new_parent:
                                 existing.parent = new_parent
                                 changed = True
@@ -384,7 +390,9 @@ class LegacySyncService:
                         else:
                             migration = LegacyMigrationV2()
                             migration.email = email
-                            migration.parent = row.get('parent', '').strip().lower()
+                            migration.parent = LegacySyncService._normalize_upliner(
+                                row.get('parent', '')
+                            )
                             migration.value = LegacySyncService._parse_value(row.get('value'))
                             migration.gsRowIndex = idx
 
@@ -485,6 +493,38 @@ class LegacySyncService:
     # =========================================================================
     # HELPERS
     # =========================================================================
+
+    @staticmethod
+    def _normalize_upliner(value: str) -> str:
+        """
+        Normalize upliner/parent email for consistent matching.
+
+        Handles special cases:
+        - "SAME" keyword: preserved as lowercase 'same'
+        - Empty string: returns empty
+        - Email: normalized via normalize_email() (handles Gmail dots, etc.)
+
+        Args:
+            value: Raw upliner/parent value from Google Sheets
+
+        Returns:
+            Normalized string
+        """
+        if not value:
+            return ''
+
+        value = str(value).strip().lower()
+
+        if not value:
+            return ''
+
+        # "SAME" is a keyword, not an email - preserve as-is
+        if value == 'same':
+            return 'same'
+
+        # Normalize as email (handles Gmail dots, etc.)
+        normalized = normalize_email(value)
+        return normalized if normalized else value
 
     @staticmethod
     def _parse_qty(value) -> int | None:
