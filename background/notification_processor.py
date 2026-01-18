@@ -325,14 +325,19 @@ class NotificationProcessor:
                     logger.info(f"Notification {notification.notificationID} sent to user {user.userID}")
                     return True
 
+
                 except Exception as send_error:
+
                     # Send failed - update error info
                     delivery.attempts += 1
                     delivery.errorMessage = str(send_error)[:500]
 
-                    if delivery.attempts >= 3:
+                    # Permanent failures - no retry
+                    error_str = str(send_error).lower()
+                    if 'chat not found' in error_str or 'user is deactivated' in error_str or 'bot was blocked' in error_str:
                         delivery.status = "error"
-
+                    elif delivery.attempts >= 3:
+                        delivery.status = "error"
                     session.commit()
                     logger.warning(f"Failed to send notification to user {user.userID}: {send_error}")
                     return False

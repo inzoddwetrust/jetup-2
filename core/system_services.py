@@ -34,7 +34,7 @@ class ServiceManager:
         self.transfer_bonus_processor: Optional['TransferBonusProcessor'] = None
         self.invoice_cleaner: Optional['InvoiceCleaner'] = None
         self.mlm_scheduler: Optional['MLMScheduler'] = None
-        self.legacy_processor: Optional['LegacyUserProcessor'] = None
+        self.legacy_loop: Optional['LegacyBackgroundLoop'] = None
 
         self._shutdown_event = asyncio.Event()
 
@@ -120,18 +120,18 @@ class ServiceManager:
         # ═══════════════════════════════════════════════════════════════
         # SERVICE 5: Legacy User Processor
         # ═══════════════════════════════════════════════════════════════
-        from background.legacy_processor import legacy_processor
+        from background.legacy_loop import legacy_loop
 
-        self.legacy_processor = legacy_processor
+        self.legacy_loop = legacy_loop
         task = asyncio.create_task(
-            self.legacy_processor.start(),
-            name="legacy_processor"
+            self.legacy_loop.start(),
+            name="legacy_loop"
         )
         self.services.append(task)
-        logger.info("✓ Legacy processor started (600s interval)")
+        logger.info("✓ Legacy loop started (3600s interval)")
 
         logger.info("=" * 60)
-        logger.info(f"✅ STARTED {len(self.services)} background services + MLM Scheduler + Legacy Processor")
+        logger.info(f"✅ STARTED {len(self.services)} background services + MLM Scheduler + Legacy Loop")
         logger.info("=" * 60)
 
         # ═══════════════════════════════════════════════════════════════
@@ -157,9 +157,9 @@ class ServiceManager:
         # Stop each service gracefully
         # ═══════════════════════════════════════════════════════════════
 
-        if self.legacy_processor:
-            logger.info("Stopping legacy processor...")
-            await self.legacy_processor.stop()
+        if self.legacy_loop:
+            logger.info("Stopping legacy loop...")
+            await self.legacy_loop.stop()
 
         if self.notification_processor:
             logger.info("Stopping notification processor...")
