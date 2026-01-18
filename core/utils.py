@@ -4,7 +4,7 @@ Utility functions and classes for Jetup bot.
 Hybrid version combining helpbot's clean architecture with talentir's advanced features.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Union, Any
 from aiogram.types import Message, CallbackQuery
@@ -218,9 +218,6 @@ class FakeCallbackQuery:
     Used when we need to process text messages using the same flow as callbacks.
     Provides minimal compatibility interface with real CallbackQuery.
 
-    Example:
-        >>> fake_callback = FakeCallbackQuery(message, data="/settings")
-        >>> await process_callback(fake_callback)
     """
 
     def __init__(self, message: Message, data: Optional[str] = None):
@@ -252,57 +249,88 @@ class FakeCallbackQuery:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def get_user_note(user, key: str) -> Optional[str]:
-    """
-    Get value from user notes by key.
-
-    Notes are stored as space-separated key:value pairs in user.notes field.
-    Example: "eula:1 verified:true last_login:2024-01-15"
-
-    Args:
-        user: User object with notes field
-        key: Note key to retrieve
-
-    Returns:
-        Note value or None if not found
-
-    Example:
-        >>> get_user_note(user, 'eula')
-        '1'
-    """
     if not user.notes:
         return None
 
     try:
-        notes = dict(note.split(':') for note in user.notes.split() if ':' in note)
-        return notes.get(key)
+        if isinstance(user.notes, dict):
+            return user.notes.get(key)
+        elif isinstance(user.notes, str):
+            notes = dict(note.split(':') for note in user.notes.split() if ':' in note)
+            return notes.get(key)
     except Exception as e:
         logger.warning(f"Error parsing user notes: {e}")
         return None
 
 
 def set_user_note(user, key: str, value: str) -> None:
-    """
-    Set key-value pair in user notes.
-
-    Args:
-        user: User object with notes field
-        key: Note key to set
-        value: Note value to set
-
-    Example:
-        >>> set_user_note(user, 'eula', '1')
-        >>> user.notes
-        'eula:1 verified:true'
-    """
     notes = {}
     if user.notes:
         try:
-            notes = dict(note.split(':') for note in user.notes.split() if ':' in note)
+            if isinstance(user.notes, dict):
+                notes = user.notes
+            elif isinstance(user.notes, str):
+                notes = dict(note.split(':') for note in user.notes.split() if ':' in note)
         except Exception as e:
             logger.warning(f"Error parsing existing user notes: {e}")
 
     notes[key] = value
-    user.notes = ' '.join(f'{k}:{v}' for k, v in notes.items())
+
+    # Keep same type as original
+    if isinstance(user.notes, dict) or user.notes is None:
+        user.notes = notes
+    else:
+        user.notes = ' '.join(f'{k}:{v}' for k, v in notes.items())
+
+# ═══════════════════════════════════════════════════════════════════════════
+# EMAIL NORMALIZATION
+# ═══════════════════════════════════════════════════════════════════════════
+
+def normalize_email(email: str) -> str:
+    """
+    Normalize email for comparison.
+
+    - Lowercase
+    - Strip whitespace
+    - Gmail: remove dots and +tag from local part
+
+    Gmail treats these as identical:
+    - user@gmail.com
+    - u.s.e.r@gmail.com
+    - user+tag@gmail.com
+    - u.s.e.r+anything@gmail.com
+
+    Args:
+        email: Raw email string
+
+    Returns:
+        Normalized email string, or empty string if invalid
+
+    Examples:
+        >>> normalize_email("User@Gmail.COM")
+        'user@gmail.com'
+        >>> normalize_email("u.s.e.r@gmail.com")
+        'user@gmail.com'
+        >>> normalize_email("user+tag@gmail.com")
+        'user@gmail.com'
+        >>> normalize_email("user@example.com")
+        'user@example.com'
+    """
+    if not email:
+        return ""
+
+    email = str(email).lower().strip()
+
+    if '@gmail.com' in email:
+        local, domain = email.split('@', 1)
+        # Remove +tag (user+tag@gmail.com → user@gmail.com)
+        if '+' in local:
+            local = local.split('+')[0]
+        # Remove dots (u.s.e.r → user)
+        local = local.replace('.', '')
+        return f"{local}@{domain}"
+
+    return email
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -449,9 +477,6 @@ def safe_get_json_value(json_field: Optional[dict], *keys, default=None):
     Returns:
         Value or default if not found
 
-    Example:
-        >>> safe_get_json_value(user.personalData, 'kyc', 'status')
-        'verified'
     """
     if not json_field:
         return default
@@ -478,8 +503,6 @@ def safe_set_json_value(obj, field_name: str, value: Any, *keys):
         value: Value to set
         *keys: Path to value
 
-    Example:
-        >>> safe_set_json_value(user, 'personalData', 'verified', 'kyc', 'status')
     """
     from sqlalchemy.orm.attributes import flag_modified
 

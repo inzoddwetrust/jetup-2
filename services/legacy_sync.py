@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation
 
 from models.legacy_migration import LegacyMigrationV1, LegacyMigrationV2
 from core.db import get_db_session_ctx
+from core.utils import normalize_email
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -153,7 +154,7 @@ class LegacySyncService:
                 for idx, row in enumerate(rows, start=2):  # Row 1 = header
                     try:
                         # Normalize email
-                        email = LegacySyncService._normalize_email(
+                        email = normalize_email(
                             row.get('email', '')
                         )
                         if not email:
@@ -353,7 +354,7 @@ class LegacySyncService:
             with get_db_session_ctx() as session:
                 for idx, row in enumerate(rows, start=2):
                     try:
-                        email = LegacySyncService._normalize_email(
+                        email = normalize_email(
                             row.get('email', '')
                         )
                         if not email:
@@ -484,24 +485,6 @@ class LegacySyncService:
     # =========================================================================
     # HELPERS
     # =========================================================================
-
-    @staticmethod
-    def _normalize_email(email: str) -> str:
-        """
-        Normalize email: lowercase, strip, Gmail dot handling.
-        """
-        if not email:
-            return ""
-
-        email = str(email).lower().strip()
-
-        # Gmail ignores dots in local part
-        if '@gmail.com' in email:
-            local, domain = email.split('@', 1)
-            local = local.replace('.', '')
-            return f"{local}@{domain}"
-
-        return email
 
     @staticmethod
     def _parse_qty(value) -> int | None:

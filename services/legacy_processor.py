@@ -12,7 +12,7 @@ Entry points:
 2. process_batch() - Called from &legacy command (batch repair)
 """
 import logging
-from typing import Optional, Dict
+from typing import Dict
 from decimal import Decimal
 from datetime import datetime, timezone
 
@@ -23,7 +23,7 @@ from models import User, Project, Purchase, ActiveBalance, Notification, Option
 from models.legacy_migration import LegacyMigrationV1, LegacyMigrationV2
 from core.db import get_db_session_ctx
 from core.templates import MessageTemplates
-from config import Config
+from core.utils import normalize_email
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +55,21 @@ class LegacyProcessor:
         stats = {'v1_processed': 0, 'v2_processed': 0, 'uplines_assigned': 0}
 
         try:
-            email = LegacyProcessor._normalize_email(user.email)
+            email = normalize_email(user.email)
             if not email:
                 return stats
 
             logger.info(f"Processing legacy migration for {email}")
+
+            # ═══════════════════════════════════════════════════════════
+            # BUILD EMAIL CACHE ONCE (avoid N+1 queries)
+            # ═══════════════════════════════════════════════════════════
+            all_users = session.query(User).filter(User.email.isnot(None)).all()
+            email_cache = {}
+            for u in all_users:
+                normalized = normalize_email(u.email)
+                if normalized:
+                    email_cache[normalized] = u
 
             # STAGE 1: Am I recipient?
             v1_count = await LegacyProcessor._process_as_recipient_v1(user, email, session)
@@ -73,8 +83,8 @@ class LegacyProcessor:
             stats['uplines_assigned'] = uplines_v1 + uplines_v2
 
             # STAGE 3: Who is my upliner?
-            my_upline_v1 = await LegacyProcessor._process_my_upliner_v1(user, email, session)
-            my_upline_v2 = await LegacyProcessor._process_my_upliner_v2(user, email, session)
+            my_upline_v1 = await LegacyProcessor._process_my_upliner_v1(user, email, session, email_cache)
+            my_upline_v2 = await LegacyProcessor._process_my_upliner_v2(user, email, session, email_cache)
             if my_upline_v1 or my_upline_v2:
                 stats['uplines_assigned'] += 1
 
@@ -116,7 +126,7 @@ class LegacyProcessor:
                 users = session.query(User).filter(User.email.isnot(None)).all()
                 email_cache = {}
                 for u in users:
-                    normalized = LegacyProcessor._normalize_email(u.email)
+                    normalized = normalize_email(u.email)
                     if normalized:
                         email_cache[normalized] = u
                 logger.info(f"Built email cache: {len(email_cache)} users")
@@ -178,7 +188,7 @@ class LegacyProcessor:
 
                 for migration in pending_v1:
                     try:
-                        normalized = LegacyProcessor._normalize_email(migration.email)
+                        normalized = normalize_email(migration.email)
                         user = email_cache.get(normalized)
                         if user and user.emailConfirmed:
                             v1 = await LegacyProcessor._process_as_recipient_v1(
@@ -197,7 +207,7 @@ class LegacyProcessor:
 
                 for migration in pending_v2:
                     try:
-                        normalized = LegacyProcessor._normalize_email(migration.email)
+                        normalized = normalize_email(migration.email)
                         user = email_cache.get(normalized)
                         if user and user.emailConfirmed:
                             v2 = await LegacyProcessor._process_as_recipient_v2(
@@ -228,7 +238,7 @@ class LegacyProcessor:
                             continue
 
                         if migration.upliner:
-                            normalized = LegacyProcessor._normalize_email(migration.upliner)
+                            normalized = normalize_email(migration.upliner)
                             upliner = email_cache.get(normalized)
                             if upliner and upliner.emailConfirmed:
                                 referral = session.query(User).filter_by(
@@ -253,7 +263,7 @@ class LegacyProcessor:
                 for migration in waiting_parent_v2:
                     try:
                         if migration.parent:
-                            normalized = LegacyProcessor._normalize_email(migration.parent)
+                            normalized = normalize_email(migration.parent)
                             parent = email_cache.get(normalized)
                             if parent and parent.emailConfirmed:
                                 referral = session.query(User).filter_by(
@@ -419,7 +429,8 @@ class LegacyProcessor:
     async def _process_my_upliner_v1(
             user: User,
             email: str,
-            session: Session
+            session: Session,
+            email_cache: Dict[str, User]
     ) -> bool:
         """Find my upliner from GS and assign. Last record = truth."""
         migration = session.query(LegacyMigrationV1).filter(
@@ -438,7 +449,8 @@ class LegacyProcessor:
             session.commit()
             return True
 
-        upliner = LegacyProcessor._get_user_by_email(session, migration.upliner)
+        normalized = normalize_email(migration.upliner)
+        upliner = email_cache.get(normalized)
         if not upliner or not upliner.emailConfirmed:
             return False
 
@@ -463,7 +475,8 @@ class LegacyProcessor:
     async def _process_my_upliner_v2(
             user: User,
             email: str,
-            session: Session
+            session: Session,
+            email_cache: Dict[str, User]
     ) -> bool:
         """Find my parent from GS (V2) and assign."""
         migration = session.query(LegacyMigrationV2).filter(
@@ -476,7 +489,8 @@ class LegacyProcessor:
         if not migration:
             return False
 
-        parent = LegacyProcessor._get_user_by_email(session, migration.parent)
+        normalized = normalize_email(migration.parent)
+        parent = email_cache.get(normalized)
         if not parent or not parent.emailConfirmed:
             return False
 
@@ -662,6 +676,30 @@ class LegacyProcessor:
                     f"JETUP or AQUIX options not found "
                     f"(JETUP={OPTION_JETUP}, AQUIX={OPTION_AQUIX})"
                 )
+
+            # PROTECTION: Check existing purchases (avoid duplicates)
+            existing_jetup = session.query(Purchase).filter(
+                Purchase.userID == user.userID,
+                Purchase.optionID == OPTION_JETUP,
+                Purchase.packQty == jetup_qty
+            ).first()
+
+            existing_aquix = session.query(Purchase).filter(
+                Purchase.userID == user.userID,
+                Purchase.optionID == OPTION_AQUIX,
+                Purchase.packQty == aquix_qty
+            ).first()
+
+            if existing_jetup and existing_aquix:
+                logger.warning(
+                    f"V2: Purchases already exist for {user.email}, linking"
+                )
+                migration.jetupPurchaseID = existing_jetup.purchaseID
+                migration.aquixPurchaseID = existing_aquix.purchaseID
+                migration.PurchaseDone = 1
+                LegacyProcessor._check_done(migration)
+                session.commit()
+                return False
 
             # JETUP: Purchase + ActiveBalance
             jetup_purchase = Purchase()
@@ -887,37 +925,6 @@ class LegacyProcessor:
     # =========================================================================
     # HELPERS
     # =========================================================================
-
-    @staticmethod
-    def _normalize_email(email: str) -> str:
-        """Normalize email: lowercase, strip, Gmail dot handling."""
-        if not email:
-            return ""
-
-        email = str(email).lower().strip()
-
-        if '@gmail.com' in email:
-            local, domain = email.split('@', 1)
-            local = local.replace('.', '')
-            return f"{local}@{domain}"
-
-        return email
-
-    @staticmethod
-    def _get_user_by_email(session: Session, email: str) -> Optional[User]:
-        """Get user by normalized email. Used in process_user (single user)."""
-        normalized = LegacyProcessor._normalize_email(email)
-        if not normalized:
-            return None
-
-        # For single lookups, query directly
-        users = session.query(User).filter(User.email.isnot(None)).all()
-
-        for user in users:
-            if LegacyProcessor._normalize_email(user.email) == normalized:
-                return user
-
-        return None
 
     @staticmethod
     def _check_done(migration):
