@@ -259,6 +259,13 @@ class LegacyProcessor:
 
                 for migration in waiting_parent_v2:
                     try:
+                        if migration.parent and migration.parent.upper() == 'SAME':
+                            migration.UplinerFound = 1
+                            LegacyProcessor._check_done(migration)
+                            # NO commit here - collect all changes
+                            stats['uplines_assigned'] += 1
+                            continue
+
                         if migration.parent:
                             normalized = normalize_email(migration.parent)
                             parent = email_cache.get(normalized)
