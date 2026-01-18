@@ -12,7 +12,7 @@ Entry points:
 2. process_batch() - Called from &legacy command (batch repair)
 """
 import logging
-from typing import Dict
+from typing import Dict, List
 from decimal import Decimal
 from datetime import datetime, timezone
 
@@ -611,7 +611,9 @@ class LegacyProcessor:
             session.commit()
 
             # STEP 4: Send notification (after commit - data is safe)
-            await LegacyProcessor._send_purchase_notification(user, purchase, migration, session)
+            await LegacyProcessor._send_purchase_notification(
+                user, purchase, migration.qty, migration.project, session
+            )
 
             logger.info(
                 f"V1: Created purchase {purchase.purchaseID} for {user.email} "
@@ -643,14 +645,6 @@ class LegacyProcessor:
                 LegacyProcessor._check_done(migration)
                 session.commit()
                 return False
-
-            # SPECIAL CASE: value=None (only change parent)
-            if migration.value is None:
-                migration.PurchaseDone = 1
-                LegacyProcessor._check_done(migration)
-                session.commit()
-                logger.info(f"V2: Migration {migration.migrationID} - value=None, marked done")
-                return True
 
             # Calculate quantities
             value = Decimal(str(migration.value)) if migration.value else Decimal("0")
@@ -757,6 +751,14 @@ class LegacyProcessor:
 
             session.commit()
 
+            # Send notifications (after commit - data is safe)
+            await LegacyProcessor._send_purchase_notification(
+                user, jetup_purchase, jetup_qty, jetup_option.projectName, session
+            )
+            await LegacyProcessor._send_purchase_notification(
+                user, aquix_purchase, aquix_qty, aquix_option.projectName, session
+            )
+
             logger.info(
                 f"V2: Created gifts for {user.email}: "
                 f"{jetup_qty} JETUP (${jetup_amount}) + {aquix_qty} AQUIX (${aquix_amount})"
@@ -842,7 +844,8 @@ class LegacyProcessor:
     async def _send_purchase_notification(
             user: User,
             purchase: Purchase,
-            migration,
+            qty: int,
+            project_name: str,
             session: Session
     ):
         """Send notification when purchase is created."""
@@ -851,8 +854,8 @@ class LegacyProcessor:
                 'legacy_purchase_created_user',
                 {
                     'firstname': user.firstname,
-                    'qty': migration.qty,
-                    'project_name': migration.project,
+                    'qty': qty,
+                    'project_name': project_name,
                     'purchase_id': purchase.purchaseID
                 },
                 lang=user.lang or 'en'
