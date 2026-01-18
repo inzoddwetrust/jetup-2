@@ -229,7 +229,7 @@ class LegacyProcessor:
                     try:
                         if migration.upliner and migration.upliner.upper() == 'SAME':
                             migration.UplinerFound = 1
-                            LegacyProcessor._check_done(migration)
+                            LegacyProcessor._update_status(migration)
                             # NO commit here - collect all changes
                             stats['uplines_assigned'] += 1
                             continue
@@ -443,7 +443,7 @@ class LegacyProcessor:
 
         if migration.upliner.upper() == 'SAME':
             migration.UplinerFound = 1
-            LegacyProcessor._check_done(migration)
+            LegacyProcessor._update_status(migration)
             session.commit()
             return True
 
@@ -464,7 +464,7 @@ class LegacyProcessor:
             ).all()
             for rec in other_records:
                 rec.UplinerFound = 1
-                LegacyProcessor._check_done(rec)
+                LegacyProcessor._update_status(rec)
             session.commit()
 
         return result
@@ -504,7 +504,7 @@ class LegacyProcessor:
             ).all()
             for rec in other_records:
                 rec.UplinerFound = 1
-                LegacyProcessor._check_done(rec)
+                LegacyProcessor._update_status(rec)
             session.commit()
 
         return result
@@ -525,7 +525,7 @@ class LegacyProcessor:
             if migration.purchaseID:
                 logger.info(f"V1: Migration {migration.migrationID} already has purchase")
                 migration.PurchaseDone = 1
-                LegacyProcessor._check_done(migration)
+                LegacyProcessor._update_status(migration)
                 session.commit()
                 return False
 
@@ -542,14 +542,14 @@ class LegacyProcessor:
                 )
                 migration.purchaseID = existing_purchase.purchaseID
                 migration.PurchaseDone = 1
-                LegacyProcessor._check_done(migration)
+                LegacyProcessor._update_status(migration)
                 session.commit()
                 return False
 
             # SPECIAL CASE: qty=None (only change upliner)
             if migration.qty is None:
                 migration.PurchaseDone = 1
-                LegacyProcessor._check_done(migration)
+                LegacyProcessor._update_status(migration)
                 session.commit()
                 logger.info(f"V1: Migration {migration.migrationID} - qty=None, marked done")
                 return True
@@ -606,7 +606,7 @@ class LegacyProcessor:
             # STEP 3: Update migration
             migration.purchaseID = purchase.purchaseID
             migration.PurchaseDone = 1
-            LegacyProcessor._check_done(migration)
+            LegacyProcessor._update_status(migration)
 
             session.commit()
 
@@ -642,7 +642,7 @@ class LegacyProcessor:
             if migration.jetupPurchaseID and migration.aquixPurchaseID:
                 logger.info(f"V2: Migration {migration.migrationID} already has purchases")
                 migration.PurchaseDone = 1
-                LegacyProcessor._check_done(migration)
+                LegacyProcessor._update_status(migration)
                 session.commit()
                 return False
 
@@ -689,7 +689,7 @@ class LegacyProcessor:
                 migration.jetupPurchaseID = existing_jetup.purchaseID
                 migration.aquixPurchaseID = existing_aquix.purchaseID
                 migration.PurchaseDone = 1
-                LegacyProcessor._check_done(migration)
+                LegacyProcessor._update_status(migration)
                 session.commit()
                 return False
 
@@ -747,7 +747,7 @@ class LegacyProcessor:
             migration.jetupPurchaseID = jetup_purchase.purchaseID
             migration.aquixPurchaseID = aquix_purchase.purchaseID
             migration.PurchaseDone = 1
-            LegacyProcessor._check_done(migration)
+            LegacyProcessor._update_status(migration)
 
             session.commit()
 
@@ -793,7 +793,7 @@ class LegacyProcessor:
                 referral.upline = upliner.telegramID
 
             migration.UplinerFound = 1
-            LegacyProcessor._check_done(migration)
+            LegacyProcessor._update_status(migration)
             session.commit()
 
             # Send notification after commit (data is safe)
@@ -824,7 +824,7 @@ class LegacyProcessor:
                 referral.upline = parent.telegramID
 
             migration.UplinerFound = 1
-            LegacyProcessor._check_done(migration)
+            LegacyProcessor._update_status(migration)
             session.commit()
 
             # Send notification after commit (data is safe)
@@ -994,15 +994,48 @@ class LegacyProcessor:
         return email_cache
 
     @staticmethod
-    def _check_done(migration):
-        """Check if migration is fully done and update status."""
-        # Use 'is not None' instead of truthiness check
-        # (in case userID could theoretically be 0)
-        if (migration.IsFound is not None and
-                migration.PurchaseDone == 1 and
-                migration.UplinerFound == 1):
-            migration.status = 'done'
-            migration.processedAt = datetime.now(timezone.utc)
+    def _update_status(migration):
+        """
+        Update migration status based on progress.
+
+        Statuses:
+        - pending: waiting for user (IsFound=null)
+        - processed: purchase done, waiting for upliner (maybe forever)
+        - completed: everything done (purchase + upliner or upliner not needed)
+        - error: failed after retries
+        """
+        # Error status is sticky
+        if migration.status == 'error':
+            return
+
+        # Not found yet - stay pending
+        if migration.IsFound is None:
+            return
+
+        # Purchase done?
+        if migration.PurchaseDone == 1:
+            # Move from pending to processed
+            if migration.status == 'pending':
+                migration.status = 'processed'
+
+            # Check if completed (upliner assigned or not needed)
+            if migration.UplinerFound == 1:
+                migration.status = 'completed'
+                migration.processedAt = datetime.now(timezone.utc)
+            else:
+                # Check if upliner not needed (empty or SAME)
+                # V1 uses 'upliner', V2 uses 'parent'
+                upliner_field = getattr(migration, 'upliner', None) or getattr(migration, 'parent', None)
+                if not upliner_field or (isinstance(upliner_field, str) and upliner_field.strip() == ''):
+                    # No upliner specified - mark as completed
+                    migration.UplinerFound = 1
+                    migration.status = 'completed'
+                    migration.processedAt = datetime.now(timezone.utc)
+                elif isinstance(upliner_field, str) and upliner_field.strip().lower() == 'same':
+                    # SAME = self-referral, no external upliner needed
+                    migration.UplinerFound = 1
+                    migration.status = 'completed'
+                    migration.processedAt = datetime.now(timezone.utc)
 
     @staticmethod
     def _record_error(migration, error: str, session: Session):
