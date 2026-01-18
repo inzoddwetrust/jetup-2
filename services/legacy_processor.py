@@ -12,7 +12,7 @@ Entry points:
 2. process_batch() - Called from &legacy command (batch repair)
 """
 import logging
-from typing import Dict, List
+from typing import Dict
 from decimal import Decimal
 from datetime import datetime, timezone
 
@@ -261,7 +261,7 @@ class LegacyProcessor:
                     try:
                         if migration.parent and migration.parent.upper() == 'SAME':
                             migration.UplinerFound = 1
-                            LegacyProcessor._check_done(migration)
+                            LegacyProcessor._update_status(migration)
                             # NO commit here - collect all changes
                             stats['uplines_assigned'] += 1
                             continue
