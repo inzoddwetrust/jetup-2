@@ -3,7 +3,8 @@
 Legacy user migration commands.
 
 Commands:
-    &legacy  - Run migration batch (processes both V1 and V2)
+    &legacy    - Run migration batch (processes both V1 and V2)
+    &export_v2 - One-time V2 export DB → GS (TEMPORARY)
 """
 import asyncio
 import logging
@@ -165,3 +166,45 @@ async def cmd_legacy(
         _run_legacy_background(message.bot, message.chat.id)
     )
     await message.answer("⏳ Legacy migration запущена в фоне. Отчёт будет отправлен по завершении.")
+
+
+# =============================================================================
+# &export_v2 - One-time V2 export (TEMPORARY - delete after use)
+# =============================================================================
+
+@legacy_router.message(F.text == '&export_v2')
+async def cmd_export_v2(
+        message: Message,
+        user: User,
+        session: Session,
+        message_manager: MessageManager
+):
+    """
+    One-time V2 export: DB → Google Sheets.
+    TEMPORARY COMMAND - delete after migration cleanup.
+    """
+    if not is_admin(message.from_user.id):
+        return
+
+    logger.info(f"Admin {message.from_user.id} triggered &export_v2")
+
+    await message.answer("⏳ Exporting V2 to Google Sheets...")
+
+    try:
+        from services.legacy_sync import LegacySyncService
+
+        exported = await LegacySyncService._export_v2()
+
+        await message.answer(
+            f"✅ V2 Export complete!\n\n"
+            f"Exported: <b>{exported}</b> records",
+            parse_mode="HTML"
+        )
+        logger.info(f"V2 export complete: {exported} records")
+
+    except Exception as e:
+        logger.error(f"V2 export error: {e}", exc_info=True)
+        await message.answer(
+            f"❌ Export failed:\n<code>{str(e)[:200]}</code>",
+            parse_mode="HTML"
+        )

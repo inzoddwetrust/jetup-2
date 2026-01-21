@@ -364,14 +364,18 @@ class LegacySyncService:
                         if not email:
                             continue
 
-                        # Check if exists
+                        # Check if exists by email only (email is unique in V2)
                         existing = session.query(LegacyMigrationV2).filter_by(
-                            email=email,
-                            gsRowIndex=idx
+                            email=email
                         ).first()
 
                         if existing:
                             changed = False
+
+                            # Update gsRowIndex if row moved in GS
+                            if existing.gsRowIndex != idx:
+                                existing.gsRowIndex = idx
+                                changed = True
 
                             new_parent = LegacySyncService._normalize_upliner(
                                 row.get('parent', '')
