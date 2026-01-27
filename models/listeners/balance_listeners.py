@@ -15,10 +15,12 @@ NOTE: All balance operations MUST go through journal tables.
 Usage:
     Listeners are registered automatically when models are imported.
     See: models/listeners/__init__.py
+
+REFACTORED: 2026-01-28 - Added COALESCE to handle NULL balances safely.
 """
 import logging
 
-from sqlalchemy import event
+from sqlalchemy import event, func
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ def register_balance_listeners():
         """
         # Only sync records with status='done'
         if target.status != 'done':
-            logger.info(
+            logger.debug(
                 f"ActiveBalance {target.paymentID}: skipping sync, "
                 f"status={target.status} (not 'done')"
             )
@@ -57,18 +59,19 @@ def register_balance_listeners():
 
         # Skip if amount is None or zero (edge case protection)
         if not target.amount:
-            logger.info(
+            logger.debug(
                 f"ActiveBalance {target.paymentID}: skipping sync, "
                 f"amount={target.amount}"
             )
             return
 
         # Update User.balanceActive atomically
+        # COALESCE handles NULL balance (treats as 0)
         connection.execute(
             User.__table__.update()
             .where(User.__table__.c.userID == target.userID)
             .values(
-                balanceActive=User.__table__.c.balanceActive + target.amount
+                balanceActive=func.coalesce(User.__table__.c.balanceActive, 0) + target.amount
             )
         )
 
@@ -93,7 +96,7 @@ def register_balance_listeners():
         """
         # Only sync records with status='done'
         if target.status != 'done':
-            logger.info(
+            logger.debug(
                 f"PassiveBalance {target.paymentID}: skipping sync, "
                 f"status={target.status} (not 'done')"
             )
@@ -101,18 +104,19 @@ def register_balance_listeners():
 
         # Skip if amount is None or zero (edge case protection)
         if not target.amount:
-            logger.info(
+            logger.debug(
                 f"PassiveBalance {target.paymentID}: skipping sync, "
                 f"amount={target.amount}"
             )
             return
 
         # Update User.balancePassive atomically
+        # COALESCE handles NULL balance (treats as 0)
         connection.execute(
             User.__table__.update()
             .where(User.__table__.c.userID == target.userID)
             .values(
-                balancePassive=User.__table__.c.balancePassive + target.amount
+                balancePassive=func.coalesce(User.__table__.c.balancePassive, 0) + target.amount
             )
         )
 

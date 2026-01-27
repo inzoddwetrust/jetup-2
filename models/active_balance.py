@@ -35,4 +35,4 @@ class ActiveBalance(Base, AuditMixin):
     user = relationship('User', backref='active_balance_transactions')
 
     def __repr__(self):
-        return f"<ActiveBalance(id={self.activeBalanceID}, user={self.userID}, amount={self.amount})>"
+        return f"<ActiveBalance(id={self.paymentID}, user={self.userID}, amount={self.amount})>"

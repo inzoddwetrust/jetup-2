@@ -262,10 +262,10 @@ SYNC_CONFIG = {
     'ActiveBalance': {
         'sheet_name': 'ActiveBalance',
         'model': ActiveBalance,
-        'primary_key': 'activeBalanceID',
+        'primary_key': 'paymentID',  # FIX: было activeBalanceID
 
         'readonly_fields': [
-            'activeBalanceID', 'userID', 'createdAt', 'updatedAt',
+            'paymentID', 'userID', 'createdAt', 'updatedAt',  # FIX: было activeBalanceID
             'firstname',
             'ownerTelegramID', 'ownerEmail'
         ],
@@ -277,7 +277,7 @@ SYNC_CONFIG = {
         'export_updates': ['status'],
 
         'required_fields': [
-            'activeBalanceID', 'userID', 'firstname', 'status', 'reason'
+            'paymentID', 'userID', 'firstname', 'status', 'reason'  # FIX: было activeBalanceID
         ],
 
         'foreign_keys': {
@@ -299,10 +299,10 @@ SYNC_CONFIG = {
     'PassiveBalance': {
         'sheet_name': 'PassiveBalance',
         'model': PassiveBalance,
-        'primary_key': 'passiveBalanceID',
+        'primary_key': 'paymentID',  # FIX: было passiveBalanceID
 
         'readonly_fields': [
-            'passiveBalanceID', 'userID', 'createdAt', 'updatedAt',
+            'paymentID', 'userID', 'createdAt', 'updatedAt',  # FIX: было passiveBalanceID
             'firstname',
             'ownerTelegramID', 'ownerEmail'
         ],
@@ -314,7 +314,7 @@ SYNC_CONFIG = {
         'export_updates': ['status'],
 
         'required_fields': [
-            'passiveBalanceID', 'userID', 'firstname', 'status', 'reason'
+            'paymentID', 'userID', 'firstname', 'status', 'reason'  # FIX: было passiveBalanceID
         ],
 
         'foreign_keys': {
@@ -325,7 +325,7 @@ SYNC_CONFIG = {
             'amount': 'decimal',
             'status': ['pending', 'done', 'cancelled', 'error']
         }
-    }
+    },
 }
 
 
