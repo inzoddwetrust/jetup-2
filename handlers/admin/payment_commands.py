@@ -186,7 +186,11 @@ async def handle_final_approval(
             logger.error(f"User not found for payment {payment_id}")
             return
 
-        # Transaction
+        # ═══════════════════════════════════════════════════════════════
+        # Create ActiveBalance record
+        # NOTE: User.balanceActive updated automatically by event listener
+        # See: models/listeners/balance_listeners.py
+        # ═══════════════════════════════════════════════════════════════
         active_balance_record = ActiveBalance(
             userID=payer.userID,
             firstname=payer.firstname,
@@ -201,7 +205,6 @@ async def handle_final_approval(
         )
         session.add(active_balance_record)
 
-        payer.balanceActive = (payer.balanceActive or Decimal("0")) + Decimal(str(payment.amount))
         payment.status = "confirmed"
         payment.confirmedBy = str(callback_query.from_user.id)
         payment.confirmationTime = datetime.now(timezone.utc)
@@ -209,6 +212,9 @@ async def handle_final_approval(
         await create_user_payment_notification(payment, payer, is_approved=True, session=session)
 
         session.commit()
+
+        # Refresh to get updated balance from listener
+        session.refresh(payer)
 
         logger.info(f"Payment {payment_id} approved: user={payer.userID}, amount={payment.amount}")
 

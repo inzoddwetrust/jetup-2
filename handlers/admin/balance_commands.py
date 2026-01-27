@@ -9,6 +9,9 @@ Commands:
 Templates used:
     admin/balance/success, admin/balance/user_not_found, admin/balance/usage, admin/balance/error
     admin/delpurchase/analysis, admin/delpurchase/success, admin/delpurchase/not_found, admin/delpurchase/usage
+
+REFACTORED: Balance updates now handled by event listeners.
+See: models/listeners/balance_listeners.py
 """
 import os
 import shutil
@@ -119,7 +122,11 @@ async def cmd_addbalance(
         return
 
     try:
+        # ═══════════════════════════════════════════════════════════════
         # Create ActiveBalance record
+        # NOTE: User.balanceActive updated automatically by event listener
+        # See: models/listeners/balance_listeners.py
+        # ═══════════════════════════════════════════════════════════════
         balance_record = ActiveBalance(
             userID=target_user.userID,
             firstname=target_user.firstname,
@@ -134,11 +141,10 @@ async def cmd_addbalance(
         )
         session.add(balance_record)
 
-        # Update user balance
-        old_balance = target_user.balanceActive or Decimal('0')
-        target_user.balanceActive = old_balance + amount
-
         session.commit()
+
+        # Refresh to get updated balance from listener
+        session.refresh(target_user)
 
         # Determine action text
         if amount >= 0:
@@ -280,9 +286,12 @@ async def cmd_delpurchase(
         refund_info = ""
         if refund_mode and purchase_user:
             refund_amount = purchase.packPrice or Decimal('0')
-            purchase_user.balanceActive = (purchase_user.balanceActive or Decimal('0')) + refund_amount
 
+            # ═══════════════════════════════════════════════════════════
             # Create refund record
+            # NOTE: User.balanceActive updated automatically by event listener
+            # See: models/listeners/balance_listeners.py
+            # ═══════════════════════════════════════════════════════════
             refund_record = ActiveBalance(
                 userID=purchase_user.userID,
                 firstname=purchase_user.firstname,

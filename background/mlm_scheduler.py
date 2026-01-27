@@ -477,7 +477,7 @@ class MLMScheduler:
         This method:
         1. Finds all pending bonuses (differential + global_pool) created BEFORE current month
         2. Creates PassiveBalance transactions
-        3. Updates user.balancePassive
+        3. User.balancePassive updated automatically by event listener
         4. Changes bonus status to "paid"
         5. Creates notifications for users
 
@@ -487,7 +487,7 @@ class MLMScheduler:
         Transaction flow (double-entry bookkeeping):
         - Bonus record: tracking/audit
         - PassiveBalance record: transaction history
-        - user.balancePassive: current balance total
+        - user.balancePassive: updated by listener (models/listeners/balance_listeners.py)
         """
         from models import PassiveBalance, Notification
         from decimal import Decimal
@@ -541,6 +541,8 @@ class MLMScheduler:
 
                 # ═══════════════════════════════════════════════════════════
                 # STEP 1: Create PassiveBalance transaction (double-entry)
+                # NOTE: User.balancePassive updated automatically by event listener
+                # See: models/listeners/balance_listeners.py
                 # ═══════════════════════════════════════════════════════════
                 passive_transaction = PassiveBalance()
                 passive_transaction.userID = bonus.userID
@@ -562,17 +564,12 @@ class MLMScheduler:
                 session.add(passive_transaction)
 
                 # ═══════════════════════════════════════════════════════════
-                # STEP 2: Update user's passive balance total
-                # ═══════════════════════════════════════════════════════════
-                user.balancePassive = (user.balancePassive or Decimal("0")) + bonus.bonusAmount
-
-                # ═══════════════════════════════════════════════════════════
-                # STEP 3: Update bonus status
+                # STEP 2: Update bonus status
                 # ═══════════════════════════════════════════════════════════
                 bonus.status = "paid"
 
                 # ═══════════════════════════════════════════════════════════
-                # STEP 4: Create notification for user (via templates)
+                # STEP 3: Create notification for user (via templates)
                 # ═══════════════════════════════════════════════════════════
                 try:
                     from core.templates import MessageTemplates
@@ -644,7 +641,7 @@ class MLMScheduler:
                 bonus.notes = (bonus.notes or "") + f" | Error: {str(e)[:200]}"
                 errors += 1
 
-        # Commit all changes
+        # Commit all changes - listeners will update User.balancePassive
         session.commit()
 
         logger.info(

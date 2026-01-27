@@ -586,35 +586,3 @@ class CommissionService:
                 f"Failed to create pending notification for bonus {bonus.bonusID}: {notif_error}",
                 exc_info=True
             )
-
-    async def _updatePassiveBalance(
-            self,
-            userId: int,
-            amount: Decimal,
-            bonusId: int
-    ):
-        """Update user's passive balance."""
-        from models.passive_balance import PassiveBalance
-
-        user = self.session.query(User).filter_by(userID=userId).first()
-        if not user:
-            logger.error(f"User {userId} not found for passive balance update")
-            return
-
-        # Update user's passive balance total
-        user.balancePassive = (user.balancePassive or Decimal("0")) + amount
-
-        # Create PassiveBalance transaction record
-        transaction = PassiveBalance()
-        transaction.userID = userId
-        transaction.firstname = user.firstname
-        transaction.surname = user.surname
-        transaction.amount = amount
-        transaction.status = "done"
-        transaction.reason = f"bonus={bonusId}"
-        transaction.link = ""
-        transaction.notes = "MLM commission"
-
-        self.session.add(transaction)
-
-        logger.info(f"Updated passive balance for user {userId}: +{amount} (bonus {bonusId})")

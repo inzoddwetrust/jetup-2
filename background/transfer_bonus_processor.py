@@ -2,10 +2,12 @@
 """
 Transfer Bonus Processor - processes pending transfer bonuses.
 Separate from MLM system to avoid conflicts.
+
+REFACTORED: Balance updates now handled by event listeners.
+See: models/listeners/balance_listeners.py
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
 from decimal import Decimal
 from sqlalchemy import and_
 
@@ -74,10 +76,11 @@ class TransferBonusProcessor:
                         errors += 1
                         continue
 
-                    # Add bonus to ACTIVE balance (not passive - this is transfer bonus!)
-                    user.balanceActive = (user.balanceActive or Decimal("0")) + bonus.bonusAmount
-
+                    # ═══════════════════════════════════════════════════════════
                     # Create ActiveBalance transaction record
+                    # NOTE: User.balanceActive updated automatically by event listener
+                    # See: models/listeners/balance_listeners.py
+                    # ═══════════════════════════════════════════════════════════
                     active_record = ActiveBalance(
                         userID=user.userID,
                         firstname=user.firstname,
@@ -111,6 +114,9 @@ class TransferBonusProcessor:
                     bonus.notes = (bonus.notes or "") + f" | Error: {str(e)[:200]}"
                     errors += 1
                     self.stats["errors"] += 1
+
+            # Commit all changes - listeners will update User balances
+            session.commit()
 
             logger.info(
                 f"Transfer bonus processing complete: "
