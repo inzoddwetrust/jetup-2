@@ -1,6 +1,8 @@
-# jetup/handlers/transfers.py
 """
 Transfer handlers - internal balance transfers between users.
+
+REFACTORED: Balance updates now handled by event listeners.
+See: models/listeners/balance_listeners.py
 """
 import logging
 from decimal import Decimal
@@ -484,8 +486,12 @@ async def execute_transfer(
 ):
     """
     Execute the transfer.
-    Creates Transfer record, updates balances, and creates pending Bonus if from passive.
-    Bonus will be processed by TransferBonusProcessor.
+
+    Creates Transfer record and journal entries (ActiveBalance/PassiveBalance).
+    User balances are updated automatically by event listeners.
+    See: models/listeners/balance_listeners.py
+
+    If from passive, creates pending Bonus for TransferBonusProcessor.
     """
     try:
         # Get transfer data
@@ -539,10 +545,10 @@ async def execute_transfer(
         session.add(transfer)
         session.flush()
 
-        # Update sender balance
+        # ═══════════════════════════════════════════════════════════════════════
+        # SENDER: Create journal entry (listener will update User balance)
+        # ═══════════════════════════════════════════════════════════════════════
         if source_balance == "active":
-            sender_db.balanceActive -= amount
-
             sender_record = ActiveBalance(
                 userID=user.userID,
                 firstname=sender_db.firstname,
@@ -554,8 +560,6 @@ async def execute_transfer(
             )
             session.add(sender_record)
         else:  # passive
-            sender_db.balancePassive -= amount
-
             sender_record = PassiveBalance(
                 userID=user.userID,
                 firstname=sender_db.firstname,
@@ -567,9 +571,9 @@ async def execute_transfer(
             )
             session.add(sender_record)
 
-        # Update recipient balance - ONLY transfer amount (not bonus!)
-        recipient.balanceActive += amount
-
+        # ═══════════════════════════════════════════════════════════════════════
+        # RECIPIENT: Create journal entry (listener will update User balance)
+        # ═══════════════════════════════════════════════════════════════════════
         recipient_transfer_record = ActiveBalance(
             userID=recipient_id,
             firstname=recipient.firstname,
@@ -613,7 +617,10 @@ async def execute_transfer(
             )
 
         # COMMIT TRANSFER (and pending bonus if created)
+        # Event listeners will update User.balanceActive/balancePassive
         session.commit()
+
+        # Refresh to get updated balances from listener
         session.refresh(sender_db)
 
         logger.info(f"Transfer {transfer.transferID} completed successfully")

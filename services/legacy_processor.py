@@ -526,7 +526,14 @@ class LegacyProcessor:
             migration: LegacyMigrationV1,
             session: Session
     ) -> bool:
-        """Create V1 purchase with double-entry bookkeeping."""
+        """
+        Create V1 purchase with double-entry bookkeeping.
+
+        Double-entry:
+        1. ActiveBalance (+) - credit from migration
+        2. ActiveBalance (-) - debit for purchase
+        3. Purchase - shares created
+        """
         try:
             # PROTECTION: Check if already processed
             if migration.purchaseID:
@@ -578,7 +585,25 @@ class LegacyProcessor:
 
             total_price = Decimal(str(option.costPerShare)) * migration.qty
 
-            # STEP 1: Create Purchase
+            # STEP 1: Create ActiveBalance CREDIT (+) - money from migration
+            balance_credit = ActiveBalance()
+            balance_credit.userID = user.userID
+            balance_credit.firstname = user.firstname
+            balance_credit.surname = user.surname
+            balance_credit.amount = total_price
+            balance_credit.status = 'done'
+            balance_credit.reason = 'legacy_migration'
+            balance_credit.link = ''
+            balance_credit.notes = (
+                f'V1 Migration credit: {migration.qty} shares of '
+                f'{migration.project} at ${option.costPerShare}/share'
+            )
+            balance_credit.ownerTelegramID = user.telegramID
+            balance_credit.ownerEmail = user.email
+            session.add(balance_credit)
+            session.flush()
+
+            # STEP 2: Create Purchase
             purchase = Purchase()
             purchase.userID = user.userID
             purchase.projectID = project.projectID
@@ -588,36 +613,33 @@ class LegacyProcessor:
             purchase.packPrice = total_price
             purchase.ownerTelegramID = user.telegramID
             purchase.ownerEmail = user.email
-
             session.add(purchase)
             session.flush()
 
-            # STEP 2: Create ActiveBalance (credit)
-            balance = ActiveBalance()
-            balance.userID = user.userID
-            balance.firstname = user.firstname
-            balance.surname = user.surname
-            balance.amount = total_price
-            balance.status = 'done'
-            balance.reason = f'legacy_migration={purchase.purchaseID}'
-            balance.link = ''
-            balance.notes = (
-                f'Legacy shares migration: {migration.qty} shares of '
-                f'{migration.project} at ${option.costPerShare}/share'
+            # STEP 3: Create ActiveBalance DEBIT (-) - money spent on purchase
+            balance_debit = ActiveBalance()
+            balance_debit.userID = user.userID
+            balance_debit.firstname = user.firstname
+            balance_debit.surname = user.surname
+            balance_debit.amount = -total_price
+            balance_debit.status = 'done'
+            balance_debit.reason = f'purchase={purchase.purchaseID}'
+            balance_debit.link = ''
+            balance_debit.notes = (
+                f'V1 Migration debit: purchase {purchase.purchaseID}'
             )
-            balance.ownerTelegramID = user.telegramID
-            balance.ownerEmail = user.email
+            balance_debit.ownerTelegramID = user.telegramID
+            balance_debit.ownerEmail = user.email
+            session.add(balance_debit)
 
-            session.add(balance)
-
-            # STEP 3: Update migration
+            # STEP 4: Update migration
             migration.purchaseID = purchase.purchaseID
             migration.PurchaseDone = 1
             LegacyProcessor._update_status(migration)
 
             session.commit()
 
-            # STEP 4: Send notification (after commit - data is safe)
+            # STEP 5: Send notification (after commit - data is safe)
             await LegacyProcessor._send_purchase_notification(
                 user, purchase, migration.qty, migration.project, session
             )
@@ -643,7 +665,14 @@ class LegacyProcessor:
             migration: LegacyMigrationV2,
             session: Session
     ) -> bool:
-        """Create V2 double gift (JETUP + AQUIX)."""
+        """
+        Create V2 double gift (JETUP + AQUIX).
+
+        Double-entry for each project:
+        1. ActiveBalance (+) - credit from migration
+        2. ActiveBalance (-) - debit for purchase
+        3. Purchase - shares created
+        """
         try:
             # PROTECTION: Check if already processed
             if migration.jetupPurchaseID and migration.aquixPurchaseID:
@@ -654,15 +683,17 @@ class LegacyProcessor:
                 return False
 
             # Calculate quantities
+            # value = number of shares (same for both JETUP and AQUIX)
             value = Decimal(str(migration.value)) if migration.value else Decimal("0")
 
             if value == 0:
                 jetup_qty = MINIMUM_GIFT_QTY
                 aquix_qty = MINIMUM_GIFT_QTY
             else:
-                jetup_qty = int(value / COST_PER_SHARE_JETUP)
-                aquix_qty = int(value / COST_PER_SHARE_AQUIX)
+                jetup_qty = int(value)
+                aquix_qty = int(value)
 
+            # Calculate amounts (qty * cost per share)
             jetup_amount = Decimal(str(jetup_qty)) * COST_PER_SHARE_JETUP
             aquix_amount = Decimal(str(aquix_qty)) * COST_PER_SHARE_AQUIX
 
@@ -700,7 +731,25 @@ class LegacyProcessor:
                 session.commit()
                 return False
 
-            # JETUP: Purchase + ActiveBalance
+            # ═══════════════════════════════════════════════════════════
+            # JETUP: Credit → Debit → Purchase
+            # ═══════════════════════════════════════════════════════════
+
+            # JETUP: ActiveBalance CREDIT (+)
+            jetup_credit = ActiveBalance()
+            jetup_credit.userID = user.userID
+            jetup_credit.firstname = user.firstname
+            jetup_credit.surname = user.surname
+            jetup_credit.amount = jetup_amount
+            jetup_credit.status = 'done'
+            jetup_credit.reason = 'legacy_migration_v2'
+            jetup_credit.notes = f'V2 Migration credit: JETUP {jetup_qty} shares'
+            jetup_credit.ownerTelegramID = user.telegramID
+            jetup_credit.ownerEmail = user.email
+            session.add(jetup_credit)
+            session.flush()
+
+            # JETUP: Purchase
             jetup_purchase = Purchase()
             jetup_purchase.userID = user.userID
             jetup_purchase.projectID = PROJECT_JETUP
@@ -713,19 +762,38 @@ class LegacyProcessor:
             session.add(jetup_purchase)
             session.flush()
 
-            jetup_balance = ActiveBalance()
-            jetup_balance.userID = user.userID
-            jetup_balance.firstname = user.firstname
-            jetup_balance.surname = user.surname
-            jetup_balance.amount = jetup_amount
-            jetup_balance.status = 'done'
-            jetup_balance.reason = f'legacy_migration={jetup_purchase.purchaseID}'
-            jetup_balance.notes = f'V2 Migration: JETUP gift {jetup_qty} shares'
-            jetup_balance.ownerTelegramID = user.telegramID
-            jetup_balance.ownerEmail = user.email
-            session.add(jetup_balance)
+            # JETUP: ActiveBalance DEBIT (-)
+            jetup_debit = ActiveBalance()
+            jetup_debit.userID = user.userID
+            jetup_debit.firstname = user.firstname
+            jetup_debit.surname = user.surname
+            jetup_debit.amount = -jetup_amount
+            jetup_debit.status = 'done'
+            jetup_debit.reason = f'purchase={jetup_purchase.purchaseID}'
+            jetup_debit.notes = f'V2 Migration debit: JETUP purchase {jetup_purchase.purchaseID}'
+            jetup_debit.ownerTelegramID = user.telegramID
+            jetup_debit.ownerEmail = user.email
+            session.add(jetup_debit)
 
-            # AQUIX: Purchase + ActiveBalance
+            # ═══════════════════════════════════════════════════════════
+            # AQUIX: Credit → Debit → Purchase
+            # ═══════════════════════════════════════════════════════════
+
+            # AQUIX: ActiveBalance CREDIT (+)
+            aquix_credit = ActiveBalance()
+            aquix_credit.userID = user.userID
+            aquix_credit.firstname = user.firstname
+            aquix_credit.surname = user.surname
+            aquix_credit.amount = aquix_amount
+            aquix_credit.status = 'done'
+            aquix_credit.reason = 'legacy_migration_v2'
+            aquix_credit.notes = f'V2 Migration credit: AQUIX {aquix_qty} shares'
+            aquix_credit.ownerTelegramID = user.telegramID
+            aquix_credit.ownerEmail = user.email
+            session.add(aquix_credit)
+            session.flush()
+
+            # AQUIX: Purchase
             aquix_purchase = Purchase()
             aquix_purchase.userID = user.userID
             aquix_purchase.projectID = PROJECT_AQUIX
@@ -738,19 +806,22 @@ class LegacyProcessor:
             session.add(aquix_purchase)
             session.flush()
 
-            aquix_balance = ActiveBalance()
-            aquix_balance.userID = user.userID
-            aquix_balance.firstname = user.firstname
-            aquix_balance.surname = user.surname
-            aquix_balance.amount = aquix_amount
-            aquix_balance.status = 'done'
-            aquix_balance.reason = f'legacy_migration={aquix_purchase.purchaseID}'
-            aquix_balance.notes = f'V2 Migration: AQUIX gift {aquix_qty} shares'
-            aquix_balance.ownerTelegramID = user.telegramID
-            aquix_balance.ownerEmail = user.email
-            session.add(aquix_balance)
+            # AQUIX: ActiveBalance DEBIT (-)
+            aquix_debit = ActiveBalance()
+            aquix_debit.userID = user.userID
+            aquix_debit.firstname = user.firstname
+            aquix_debit.surname = user.surname
+            aquix_debit.amount = -aquix_amount
+            aquix_debit.status = 'done'
+            aquix_debit.reason = f'purchase={aquix_purchase.purchaseID}'
+            aquix_debit.notes = f'V2 Migration debit: AQUIX purchase {aquix_purchase.purchaseID}'
+            aquix_debit.ownerTelegramID = user.telegramID
+            aquix_debit.ownerEmail = user.email
+            session.add(aquix_debit)
 
+            # ═══════════════════════════════════════════════════════════
             # Update migration
+            # ═══════════════════════════════════════════════════════════
             migration.jetupPurchaseID = jetup_purchase.purchaseID
             migration.aquixPurchaseID = aquix_purchase.purchaseID
             migration.PurchaseDone = 1

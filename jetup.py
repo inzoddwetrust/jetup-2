@@ -69,6 +69,14 @@ async def initialize_bot():
         logger.info("✓ Database ready")
 
         # ═══════════════════════════════════════════════════════════════════════
+        # STEP 2.5: Register event listeners
+        # ═══════════════════════════════════════════════════════════════════════
+        logger.info("👂 Registering event listeners...")
+        from models.listeners import register_all_listeners
+        register_all_listeners()
+        logger.info("✓ Event listeners registered")
+
+        # ═══════════════════════════════════════════════════════════════════════
         # STEP 3: Validate critical configuration
         # ═══════════════════════════════════════════════════════════════════════
         logger.info("🔍 Validating critical configuration keys...")

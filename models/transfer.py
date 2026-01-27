@@ -1,4 +1,3 @@
-# bot/config/transfer.py
 """
 Transfer model - tracks internal transfers between users.
 """

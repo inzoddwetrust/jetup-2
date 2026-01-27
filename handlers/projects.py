@@ -16,7 +16,6 @@ from models.option import Option
 from core.message_manager import MessageManager
 from core.user_decorator import with_user
 from config import Config
-from core.di import get_service
 from states.fsm_states import ProjectCarouselState
 
 logger = logging.getLogger(__name__)
@@ -447,6 +446,7 @@ async def handle_option_selection(
 @with_user
 async def confirm_purchase(
         callback_query: CallbackQuery,
+        state: FSMContext,
         user: User,
         session: Session,
         message_manager: MessageManager,
@@ -459,7 +459,7 @@ async def confirm_purchase(
     1. Lock user and option (pessimistic locking)
     2. Check balance again
     3. Create Purchase
-    4. Deduct from ActiveBalance (table + field)
+    4. Create ActiveBalance record (listener updates User.balanceActive)
     5. Emit MLM event for commission processing
     6. Show success message
     """
@@ -525,10 +525,11 @@ async def confirm_purchase(
         # Convert price to Decimal
         pack_price = Decimal(str(option.packPrice))
 
-        # Deduct from active balance (field)
-        user.balanceActive -= pack_price
-
+        # ═══════════════════════════════════════════════════════════════════════
         # Create ActiveBalance transaction record
+        # NOTE: User.balanceActive updated automatically by event listener
+        # See: models/listeners/balance_listeners.py
+        # ═══════════════════════════════════════════════════════════════════════
         from models.active_balance import ActiveBalance
         active_record = ActiveBalance()
         active_record.userID = user.userID
@@ -544,6 +545,9 @@ async def confirm_purchase(
 
         # Commit purchase and balance changes
         session.commit()
+
+        # Refresh to get updated balance from listener
+        session.refresh(user)
 
         logger.info(
             f"Purchase {purchase.purchaseID} completed: "
