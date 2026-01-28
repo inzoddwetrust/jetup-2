@@ -3,24 +3,20 @@
 Balance Event Listeners - Auto-sync User balances on journal changes.
 
 Architecture:
-    ActiveBalance (INSERT) → User.balanceActive += amount
-    PassiveBalance (INSERT) → User.balancePassive += amount
+    ActiveBalance (INSERT/UPDATE/DELETE) → User.balanceActive = SUM(journal)
+    PassiveBalance (INSERT/UPDATE/DELETE) → User.balancePassive = SUM(journal)
 
-This ensures User.balanceActive/balancePassive always equals
-SUM(amount) from corresponding journal tables.
+This ensures User.balanceActive/balancePassive ALWAYS equals
+SUM(amount) from corresponding journal tables. Discrepancies are IMPOSSIBLE.
 
 NOTE: All balance operations MUST go through journal tables.
       Direct User.balanceActive = X is FORBIDDEN after this refactor.
 
-Usage:
-    Listeners are registered automatically when models are imported.
-    See: models/listeners/__init__.py
-
-REFACTORED: 2026-01-28 - Added COALESCE to handle NULL balances safely.
+REFACTORED: 2026-01-28 - Full recalculation instead of incremental updates.
 """
 import logging
 
-from sqlalchemy import event, func
+from sqlalchemy import event, func, select
 
 logger = logging.getLogger(__name__)
 
@@ -36,94 +32,74 @@ def register_balance_listeners():
     from models.user import User
 
     # =========================================================================
-    # ACTIVE BALANCE LISTENER
+    # ACTIVE BALANCE LISTENERS
     # =========================================================================
 
-    @event.listens_for(ActiveBalance, 'after_insert')
-    def sync_active_balance_on_insert(mapper, connection, target):
+    def recalc_active_balance(mapper, connection, target):
         """
-        Auto-update User.balanceActive when ActiveBalance record is created.
+        Full recalculation of User.balanceActive from journal.
 
-        Args:
-            mapper: SQLAlchemy mapper (unused)
-            connection: Raw DB connection (used for UPDATE)
-            target: The ActiveBalance instance being inserted
+        Formula: User.balanceActive = SUM(ActiveBalance.amount)
+                                      WHERE userID=X AND status='done'
         """
-        # Only sync records with status='done'
-        if target.status != 'done':
-            logger.debug(
-                f"ActiveBalance {target.paymentID}: skipping sync, "
-                f"status={target.status} (not 'done')"
-            )
-            return
+        # Calculate REAL sum from journal
+        result = connection.execute(
+            select(func.coalesce(func.sum(ActiveBalance.__table__.c.amount), 0))
+            .where(ActiveBalance.__table__.c.userID == target.userID)
+            .where(ActiveBalance.__table__.c.status == 'done')
+        )
+        real_balance = result.scalar()
 
-        # Skip if amount is None or zero (edge case protection)
-        if not target.amount:
-            logger.debug(
-                f"ActiveBalance {target.paymentID}: skipping sync, "
-                f"amount={target.amount}"
-            )
-            return
-
-        # Update User.balanceActive atomically
-        # COALESCE handles NULL balance (treats as 0)
+        # Overwrite (NOT increment!)
         connection.execute(
             User.__table__.update()
             .where(User.__table__.c.userID == target.userID)
-            .values(
-                balanceActive=func.coalesce(User.__table__.c.balanceActive, 0) + target.amount
-            )
+            .values(balanceActive=real_balance)
         )
 
         logger.info(
-            f"ActiveBalance SYNC: user={target.userID}, "
-            f"amount={target.amount}, reason={target.reason}"
+            f"ActiveBalance RECALC: user={target.userID}, "
+            f"new_balance={real_balance}, trigger={target.reason}"
         )
 
+    event.listen(ActiveBalance, 'after_insert', recalc_active_balance)
+    event.listen(ActiveBalance, 'after_update', recalc_active_balance)
+    event.listen(ActiveBalance, 'after_delete', recalc_active_balance)
+
     # =========================================================================
-    # PASSIVE BALANCE LISTENER
+    # PASSIVE BALANCE LISTENERS
     # =========================================================================
 
-    @event.listens_for(PassiveBalance, 'after_insert')
-    def sync_passive_balance_on_insert(mapper, connection, target):
+    def recalc_passive_balance(mapper, connection, target):
         """
-        Auto-update User.balancePassive when PassiveBalance record is created.
+        Full recalculation of User.balancePassive from journal.
 
-        Args:
-            mapper: SQLAlchemy mapper (unused)
-            connection: Raw DB connection (used for UPDATE)
-            target: The PassiveBalance instance being inserted
+        Formula: User.balancePassive = SUM(PassiveBalance.amount)
+                                       WHERE userID=X AND status='done'
         """
-        # Only sync records with status='done'
-        if target.status != 'done':
-            logger.debug(
-                f"PassiveBalance {target.paymentID}: skipping sync, "
-                f"status={target.status} (not 'done')"
-            )
-            return
+        # Calculate REAL sum from journal
+        result = connection.execute(
+            select(func.coalesce(func.sum(PassiveBalance.__table__.c.amount), 0))
+            .where(PassiveBalance.__table__.c.userID == target.userID)
+            .where(PassiveBalance.__table__.c.status == 'done')
+        )
+        real_balance = result.scalar()
 
-        # Skip if amount is None or zero (edge case protection)
-        if not target.amount:
-            logger.debug(
-                f"PassiveBalance {target.paymentID}: skipping sync, "
-                f"amount={target.amount}"
-            )
-            return
-
-        # Update User.balancePassive atomically
-        # COALESCE handles NULL balance (treats as 0)
+        # Overwrite (NOT increment!)
         connection.execute(
             User.__table__.update()
             .where(User.__table__.c.userID == target.userID)
-            .values(
-                balancePassive=func.coalesce(User.__table__.c.balancePassive, 0) + target.amount
-            )
+            .values(balancePassive=real_balance)
         )
 
         logger.info(
-            f"PassiveBalance SYNC: user={target.userID}, "
-            f"amount={target.amount}, reason={target.reason}"
+            f"PassiveBalance RECALC: user={target.userID}, "
+            f"new_balance={real_balance}, trigger={target.reason}"
         )
+
+    event.listen(PassiveBalance, 'after_insert', recalc_passive_balance)
+    event.listen(PassiveBalance, 'after_update', recalc_passive_balance)
+    event.listen(PassiveBalance, 'after_delete', recalc_passive_balance)
 
 
 # =========================================================================
