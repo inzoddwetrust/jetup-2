@@ -2,7 +2,7 @@
 """
 Base model and mixins for all database tables.
 """
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy import Column, BigInteger, String, DateTime
 
 Base = declarative_base()
