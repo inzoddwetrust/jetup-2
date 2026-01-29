@@ -279,7 +279,6 @@ async def create_payment_record(
             edit=True
         )
 
-
 @payments_router.callback_query(F.data == "cancel_payment")
 async def cancel_payment(
         callback_query: CallbackQuery,
@@ -292,13 +291,9 @@ async def cancel_payment(
     await callback_query.answer("Operation cancelled")
     await state.clear()
 
-    # Return to finances screen
-    await message_manager.send_template(
-        user=user,
-        template_key='/finances',
-        update=callback_query,
-        delete_original=True
-    )
+    # Return to finances screen via proper handler
+    from handlers.finances import handle_finances
+    await handle_finances(callback_query, session, user, message_manager)
 
 
 # ============================================================================
