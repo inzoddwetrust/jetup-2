@@ -45,3 +45,15 @@ class TransferDialog(StatesGroup):
 class TxidInputState(StatesGroup):
     """States for TXID input."""
     waiting_for_txid = State()
+
+
+class WithdrawalState(StatesGroup):
+    """States for withdrawal flow."""
+    waiting_for_wallet = State()   # Waiting for wallet address input
+    waiting_for_amount = State()   # Waiting for amount input
+    confirm_withdrawal = State()   # Waiting for confirmation
+
+
+class AdminWithdrawalState(StatesGroup):
+    """States for admin withdrawal processing."""
+    waiting_for_txid = State()     # Waiting for TXID input from admin

@@ -142,7 +142,7 @@ SYNC_CONFIG = {
 
         'field_validators': {
             'amount': 'decimal',
-            'status': ['pending', 'check', 'confirmed', 'rejected', 'cancelled'],
+            'status': ['pending', 'check', 'processing', 'done', 'rejected', 'cancelled', 'expired'],
             'direction': ['in', 'out'],
             'confirmationTime': 'datetime'
         }

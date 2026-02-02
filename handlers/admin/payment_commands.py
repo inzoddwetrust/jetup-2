@@ -205,7 +205,7 @@ async def handle_final_approval(
         )
         session.add(active_balance_record)
 
-        payment.status = "confirmed"
+        payment.status = "done"
         payment.confirmedBy = str(callback_query.from_user.id)
         payment.confirmationTime = datetime.now(timezone.utc)
 
@@ -284,7 +284,7 @@ async def handle_rejection(
             logger.error(f"User not found for payment {payment_id}")
             return
 
-        payment.status = "failed"
+        payment.status = "rejected"
         payment.confirmedBy = str(callback_query.from_user.id)
         payment.confirmationTime = datetime.now(timezone.utc)
 
@@ -349,7 +349,7 @@ async def cmd_checkpayments(
     if not is_admin(message.from_user.id):
         return
 
-    from handlers.payments import create_payment_check_notification
+    from handlers.payments_in import create_payment_check_notification
 
     logger.info(f"Admin {message.from_user.id} triggered &checkpayments")
 

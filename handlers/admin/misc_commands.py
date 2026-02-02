@@ -90,7 +90,7 @@ async def cmd_stats(
 
         # Financial stats
         deposits_total = session.query(func.sum(Payment.amount)).filter(
-            Payment.status == 'confirmed'
+            Payment.status == 'done'
         ).scalar() or Decimal('0')
 
         payments_pending = session.query(func.count(Payment.paymentID)).filter(

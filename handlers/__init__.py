@@ -8,7 +8,8 @@ from aiogram import Dispatcher, Bot
 from handlers.start import start_router
 from handlers.projects import projects_router
 from handlers.finances import finances_router
-from handlers.payments import payments_router
+from handlers.payments_in import payments_in_router
+from handlers.payments_out import payments_out_router
 from handlers.transfers import transfers_router
 from handlers.portfolio import portfolio_router
 from handlers.team import team_router
@@ -27,7 +28,8 @@ def register_all_handlers(dp: Dispatcher, bot: Bot):
     dp.include_router(start_router)
     dp.include_router(projects_router)
     dp.include_router(finances_router)
-    dp.include_router(payments_router)
+    dp.include_router(payments_in_router)
+    dp.include_router(payments_out_router)
     dp.include_router(transfers_router)
     dp.include_router(portfolio_router)
     dp.include_router(team_router)
@@ -40,11 +42,3 @@ def register_all_handlers(dp: Dispatcher, bot: Bot):
     dp.include_router(fallback_router)
 
     logger.info("All handlers registered")
-
-    # TODO: Add more routers as they are created:
-    # from handlers.portfolio import portfolio_router
-    # from handlers.team import team_router
-    # from handlers.settings import settings_router
-    # dp.include_router(portfolio_router)
-    # dp.include_router(team_router)
-    # dp.include_router(settings_router)

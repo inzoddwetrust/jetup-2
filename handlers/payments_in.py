@@ -25,14 +25,14 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-payments_router = Router(name="payments_router")
+payments_in_router = Router(name="payments_in_router")
 
 
 # ============================================================================
 # PAYMENT FLOW - USER SIDE
 # ============================================================================
 
-@payments_router.callback_query(F.data == "add_balance")
+@payments_in_router.callback_query(F.data == "add_balance")
 async def add_balance_start(
         callback_query: CallbackQuery,
         user: User,
@@ -58,7 +58,7 @@ async def add_balance_start(
     await state.set_state(PurchaseFlow.waiting_for_payment)
 
 
-@payments_router.callback_query(
+@payments_in_router.callback_query(
     F.data.startswith("amount_"),
     PurchaseFlow.waiting_for_payment
 )
@@ -94,7 +94,7 @@ async def select_amount(
     )
 
 
-@payments_router.message(
+@payments_in_router.message(
     PurchaseFlow.waiting_for_payment,
     F.content_type == "text"
 )
@@ -130,7 +130,7 @@ async def custom_amount_input(
         )
 
 
-@payments_router.callback_query(
+@payments_in_router.callback_query(
     F.data.startswith("currency_"),
     PurchaseFlow.waiting_for_payment
 )
@@ -199,7 +199,7 @@ async def confirm_invoice(
     )
 
 
-@payments_router.callback_query(
+@payments_in_router.callback_query(
     F.data == "confirm_payment",
     PurchaseFlow.waiting_for_payment
 )
@@ -279,7 +279,7 @@ async def create_payment_record(
             edit=True
         )
 
-@payments_router.callback_query(F.data == "cancel_payment")
+@payments_in_router.callback_query(F.data == "cancel_payment")
 async def cancel_payment(
         callback_query: CallbackQuery,
         user: User,
@@ -300,7 +300,7 @@ async def cancel_payment(
 # TXID INPUT FLOW
 # ============================================================================
 
-@payments_router.callback_query(F.data.startswith("enter_txid_"))
+@payments_in_router.callback_query(F.data.startswith("enter_txid_"))
 async def request_txid(
         callback_query: CallbackQuery,
         user: User,
@@ -328,7 +328,7 @@ async def request_txid(
     await state.set_state(TxidInputState.waiting_for_txid)
 
 
-@payments_router.message(
+@payments_in_router.message(
     TxidInputState.waiting_for_txid,
     F.content_type == "text"
 )
@@ -477,7 +477,7 @@ async def process_txid_input(
 # PENDING/PAID INVOICES
 # ============================================================================
 
-@payments_router.callback_query(F.data == "pending_invoices")
+@payments_in_router.callback_query(F.data == "pending_invoices")
 async def pending_invoices_handler(
         callback_query: CallbackQuery,
         user: User,
@@ -545,7 +545,7 @@ async def pending_invoices_handler(
     )
 
 
-@payments_router.callback_query(F.data == "paid_invoices")
+@payments_in_router.callback_query(F.data == "paid_invoices")
 async def paid_invoices_handler(
         callback_query: CallbackQuery,
         user: User,

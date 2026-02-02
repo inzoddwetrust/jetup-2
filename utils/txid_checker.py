@@ -65,6 +65,14 @@ def validate_txid(txid: str, method: str) -> ValidationResult:
     Returns:
         ValidationResult with code and optional details
     """
+    # ═══════════════════════════════════════════════════════════
+    # DUMMY TXID FOR TESTING
+    # If TXID starts with "test_" — skip format validation
+    # ═══════════════════════════════════════════════════════════
+    if txid.lower().startswith("test_"):
+        logger.info(f"Dummy TXID accepted: {txid}")
+        return ValidationResult(TxidValidationCode.VALID_TRANSACTION)
+
     txid = txid.lower().strip()
 
     if method in ["ETH", "BNB", "USDT-ERC20", "USDT-BSC20"]:
@@ -100,6 +108,17 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
     Returns:
         ValidationResult with transaction details
     """
+    # ═══════════════════════════════════════════════════════════
+    # DUMMY TXID FOR TESTING
+    # If TXID starts with "test_" — skip API verification
+    # ═══════════════════════════════════════════════════════════
+    if txid.lower().startswith("test_"):
+        logger.info(f"Dummy TXID detected: {txid}, skipping API verification")
+        return ValidationResult(
+            TxidValidationCode.VALID_TRANSACTION,
+            details="Test transaction (API check skipped)"
+        )
+
     try:
         logger.info(f"Starting verification for txid: {txid}, method: {method}")
         logger.info(f"Expected recipient address: {expected_address}")
